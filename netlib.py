@@ -3,6 +3,7 @@ import typing
 import traceback
 import logging
 import cmd
+from typing import Union
 import colorama # for different colored text to help tell apart certain messages
 # import curses # weird name, it allows us to do some formatting the cmd.cmd terminal. 
 # for insance we want incoming messages to be in a different area on the terminal screen.
@@ -155,7 +156,7 @@ class shell(cmd.Cmd):
         self.client = client
         self.server = server
     
-    def listSockets(self, arg: client | server ):
+    def listSockets(self, arg: Union[client, server] ):
         ''' prints all sockets managed by the arg'''  
         # cmd will automagically add function doc-strings to the help command
         pass
