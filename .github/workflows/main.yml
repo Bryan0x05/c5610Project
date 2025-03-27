@@ -26,4 +26,3 @@ jobs:
         uses: jakebailey/pyright-action@v2.3.2
         with:
            warnings: true
-           

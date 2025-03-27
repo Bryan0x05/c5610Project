@@ -1,8 +1,9 @@
-import socket 
-import typing 
-import traceback 
-import logging  
+import socket
+import typing
+import traceback
+import logging
 import cmd
+from typing import Union
 import colorama # for different colored text to help tell apart certain messages
 # import curses # weird name, it allows us to do some formatting the cmd.cmd terminal. 
 # for insance we want incoming messages to be in a different area on the terminal screen.
@@ -18,7 +19,7 @@ class netProc:
         self.port = port
         self.conID = 1
         self.connections: typing.Dict[ tuple [ str, int ], socket.socket] = {}
-        self.nicknames: typing.Dict[ int, tuple[ str, int ] ] = {} 
+        self.nicknames: typing.Dict[ int, tuple[ str, int ] ] = {}
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         # listen to any IP, sending traffic to our port
@@ -39,7 +40,7 @@ class netProc:
         self.nicknames[ self.conID ] = ( addr, self.port )
         self.conID += 1
         self.connections[ ( addr, self.port ) ] = conSock
-        conSock.sendall( ("Socket connected!").encode() )   
+        conSock.sendall( ("Socket connected!").encode() )
         
     def connectToHost( self, hostName: str, port: int ) -> bool:
        ''' Connects by host name e.g. www.google.com '''
@@ -82,7 +83,7 @@ class netProc:
     def listAllConns( self ):
         ''' List all socket connections in <nickname> => <ip>:<port> format'''
         for idx, key in enumerate( self.nicknames ):
-            print("{idx}. {key} => {self.nicknames[key]} ") 
+            print("{idx}. {key} => {self.nicknames[key]} ")
     
     def readMsg( self ):
         ''' Read a socket message'''
@@ -155,7 +156,7 @@ class shell(cmd.Cmd):
         self.client = client
         self.server = server
     
-    def listSockets(self, arg: client | server ):
+    def listSockets(self, arg: Union[client, server] ):
         ''' prints all sockets managed by the arg'''  
         # cmd will automagically add function doc-strings to the help command
         pass
@@ -180,5 +181,3 @@ class shell(cmd.Cmd):
 # script guard, things in this script don't run automatically when imported
 if __name__ == "__main__":
     pass
-    
-    
