@@ -1,4 +1,3 @@
-import multiprocessing.process
 import netlib
 import multiprocessing
 
@@ -6,7 +5,8 @@ import multiprocessing
 # requires a script guard, since spawn reimports modules
 if __name__ == '__main__':
     server = netlib.server( port = 65535 )
-    client = netlib.client( port = 65525 )
+    client = netlib.client( port = 65525, sInfo = ( server.getMyIpAddr(), server.port ) )
+    
     # create procs
     sProc = multiprocessing.Process( target = server.runLoop() )
     cProc = multiprocessing.Process( target = client.runLoop() )

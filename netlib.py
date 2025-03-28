@@ -1,10 +1,12 @@
+import multiprocessing.connection
 import socket
 import typing
 import traceback
 import logging
 import cmd
+import multiprocessing
 from typing import Union
-import colorama # for different colored text to help tell apart certain messages
+# import colorama # for different colored text to help tell apart certain messages
 # import curses # weird name, it allows us to do some formatting the cmd.cmd terminal. 
 # for insance we want incoming messages to be in a different area on the terminal screen.
 # Though its a linux-based module
@@ -15,17 +17,20 @@ logging.basicConfig(level=logging.DEBUG)
 
 class netProc:
     '''Super class for the common networking functions between client and server'''
-    def __init__( self, port: int ):
+    def __init__( self, port: int):
         self.port = port
         self.conID = 1
         self.connections: typing.Dict[ tuple [ str, int ], socket.socket] = {}
         self.nicknames: typing.Dict[ int, tuple[ str, int ] ] = {}
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+        self.socket.setblocking(False)
+        self.socket.settimeout(5)
         # listen to any IP, sending traffic to our port
         # assuming client and server both want to listen for now
         try:
             self.socket.bind( ( '', port ) )
+            print(f"listening on port: {port}")
         except:
             logging.error( traceback.format_exc() )
             exit(-1)
@@ -33,14 +38,24 @@ class netProc:
         # OS should manage this queue, so its non-blocking
         self.socket.listen( 5 )
 
-    def acceptConn( self ):
+    def acceptConn( self ) -> bool:
         ''' Accept a socket connection, warning this is blocking by default'''
         # this is blocking! It'll wait until someone tries to talk to us!
-        conSock, addr = self.socket.accept()
-        self.nicknames[ self.conID ] = ( addr, self.port )
-        self.conID += 1
-        self.connections[ ( addr, self.port ) ] = conSock
-        conSock.sendall( ("Socket connected!").encode() )
+        
+        print( self.socket.getsockname)
+        try:
+            conSock, addr = self.socket.accept()
+            self.nicknames[ self.conID ] = ( addr, self.port )
+            self.conID += 1
+            self.connections[ ( addr, self.port ) ] = conSock
+            conSock.sendall( (f"Socket connected on ( {addr}:{self.port})").encode() )
+        except TimeoutError:
+            return False
+        except Exception:
+            logging.error( traceback.format_exc() )
+            return False
+        
+        return True
         
     def connectToHost( self, hostName: str, port: int ) -> bool:
        ''' Connects by host name e.g. www.google.com '''
@@ -124,23 +139,41 @@ class netProc:
         self.socket.close()
             
 class client(netProc):
-    def __init__(self, port: int):
-        super().__init__(  port )
+    def __init__(self, port: int, sInfo: tuple[ str, int ] ):
+        super().__init__( port )
+        self.sInfo = sInfo
         
     def runLoop( self ):
         ''' Do all the client things '''
+        print(self.getMyIpAddr())
+        print(self.sInfo)
+        try:
+            self.socket.connect( ('localip', self.sInfo[1]) )
+        except Exception:
+            logging.error( traceback.format_exc() )
+        
         # right now we just gracefully shutdown
-        print("Loop is running, shutting down now!")
+        # shell( client = self ).cmdloop( intro="shell started!")
+        print( "Client loop is running, shutting down now!" )
         self.shutDown()
         
+    def recvMessage( self ):
+        pass
+        
+        
 class server(netProc):
-    def __init__(self, port: int):
+    def __init__(self, port: int ):
         super().__init__( port )
-    
+
     def runLoop( self ):
         ''' Do all the server things '''
-        # right now we just gracefully shutdown
-        print("Loop is running, shutting down now!")
+        i = 1
+        while True:
+            if i < 3:
+                self.acceptConn()
+                i += 1
+            # right now we just gracefully shutdown
+        print("Server loop is running, shutting down now!")
         self.shutDown()
 
 # This might be a 3rd process, or its part of the client process. If that's the case
@@ -151,10 +184,9 @@ class shell(cmd.Cmd):
     intro = "Welcome to the peer command shell. Type help or ? to list commands\n"
     prompt = "shell> "
     
-    def __init__(self, client : client, server : server ):
+    def __init__(self, client : client ):
         super().__init__()
         self.client = client
-        self.server = server
     
     def listSockets(self, arg: Union[client, server] ):
         ''' prints all sockets managed by the arg'''  
@@ -169,9 +201,6 @@ class shell(cmd.Cmd):
         ''' Send a message to the given socket by nickname? '''
         pass
     
-    def runLoop(self):
-        ''' Infinite shell loop '''
-        pass
     # If we are doing the server is the point of contact model
     # Then the server should be automatically reading incoming message
     # and if its for the client, to forward it to the client process
