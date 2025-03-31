@@ -7,9 +7,8 @@ if __name__ == '__main__':
     server = netlib.server( port = 65535 )
     client = netlib.client( port = 65525, sInfo=( server.getMyIpAddr(), 65535 ) )
 
-    
     # create procs
-    sProc = multiprocessing.Process( target = server.runLoop )
+    sProc = multiprocessing.Process( target = server.runLoop, name="server proc" )
     # cProc = multiprocessing.Process( target = client.runLoop )
 
     # start procs
@@ -20,6 +19,7 @@ if __name__ == '__main__':
     # cmdloop() had stdin issues running a new process
     client.runLoop()
     # wait until procs are finished
+    print("Waiting for server to go down...")
     sProc.join()
     # cProc.join()
 
