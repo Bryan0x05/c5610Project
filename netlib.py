@@ -8,29 +8,40 @@ from typing import Union
 import sys
 import threading
 from enum import Enum
+import time
 # import colorama # for different colored text to help tell apart certain messages
-# import curses # weird name, it allows us to do some formatting the cmd.cmd terminal. 
-# for insance we want incoming messages to be in a different area on the terminal screen.
-# Though its a linux-based module
+# import curses # linux based module for terminal formatting
+
+# argument seperator
+ASEP = "|"
+
+class Command(Enum):
+    GET_DICT = 0     # Client -> Server: Get nickname dictionary from server
+    SEND_MSG = 1     # Client -> Server: Send a message to someone else in the network
+    RECV_MSG = 2     # Server -> Client: A message has arrived for the client - pass it on
+    KNOCK = 3        # Knock
+    HEARTBEAT = 4    # Heartbeat
+    KILL_SERVER = 5  # Client -> Server: Kill the server process
+    KILL_NETWORK = 6 # Client -> Server, Server -> Server: Kill the entire network by sending the message to all other nodes
 
 # might be excessive for what we're doing but the idea is we don't have to find debug prints later
 # and remove them, we can just change the logging level.
 logging.basicConfig(level=logging.DEBUG)
 
-class threadPlus(threading.Thread):
+class threadPlus ( threading.Thread ):
     ''' Wrapper to a thread to be externally killed in a safe manner'''
-    def __init__( self, func, *args, **kwargs ):
-        '''' Initialize thread with func and args'''
-        super().__init__()
-        self.func = func
+    def __init__(self, target, group = None, args=(),**kwargs ) -> None:
+        super().__init__( group, target, None, args, kwargs, daemon=None )
+        self.target = target
         self.args = args
-        self.kwards = kwargs
-        self.stopFlag = threading.Event()
-    
+        self.kwargs = kwargs
+        
     def run( self ):
+        self.stopFlag = threading.Event()
         ''' Run in a forver loop until stop flag is set'''
-        while not self.stop:
-            self.func(*self.args, **self.kwards)
+        print(" HEY I AM IN THE THREADPLUS RUN")
+        while self.stopFlag:
+            self.target(*self.args, **self.kwargs)
     
     def stop(self):
         ''' Set stop flag '''
@@ -40,7 +51,7 @@ class netProc:
     '''Super class for the common networking functions between client and server'''
     def __init__( self, port: int):
         self.port = port
-        self.conID = 1
+        self.conID = 0
         self.connections: typing.Dict[ tuple [ str, int ], socket.socket] = {}
         self.nicknames: typing.Dict[ int, tuple[ str, int ] ] = {}
         # ipv4, TCP
@@ -51,17 +62,20 @@ class netProc:
     def acceptConn( self ) -> bool:
         ''' Accept a socket connection, warning this is blocking by default'''
         # this is blocking! It'll wait until someone tries to talk to us!
-        
-        print( self.socket.getsockname() )
         try:
-            conSock, addr = self.socket.accept()
-            self.nicknames[ self.conID ] = ( addr, self.port )
+            conSock, addrAndPort = self.socket.accept()
+            logging.debug(f"Connected accepted on {addrAndPort}")
+            self.nicknames[ self.conID ] = ( addrAndPort )
             self.conID += 1
-            self.connections[ ( addr, self.port ) ] = conSock
-            conSock.sendall( (f"Socket connected on ( {addr}:{self.port})").encode() )
+            self.connections[ ( addrAndPort ) ] = conSock
+            conSock.setblocking(False)
+            conSock.settimeout(5)
+            conSock.sendall( messageHandler.encode_message(Command.HEARTBEAT, "Socket on ", *addrAndPort)  )
         except BlockingIOError:
-            pass # pretty useless warning/error
+            # logging.error( traceback.format_exc() ) # uncomment this at your own sanity
+            return False
         except TimeoutError:
+            logging.warning("timeout in accpet connection")
             return False
         except Exception:
             logging.error( traceback.format_exc() )
@@ -123,19 +137,21 @@ class netProc:
         for idx, key in enumerate( self.nicknames ):
             print("{idx}. {key} => {self.nicknames[key]} ")
     
-    def readMsg( self, sock : socket.socket ):
+    def readMsg( self, sock : socket.socket ) -> Union[ tuple[ Command, list ], None ]:
         ''' Read a socket message'''
-        msg = str()
+        msg : bytes = bytes()
         try:
-            msg = sock.recv(1024).decode()
-            while( msg ):
+            msg = sock.recv(1024)
+            while( len(msg) > 0 ):
                 msg += msg
+        except TimeoutError:
+                logging.warning( traceback.format_exc() )
+                return None
         except Exception:
-            pass
-            # logging.error( traceback.format_exc() )
+                logging.error( traceback.format_exc() )
             
-        # logging.debug( "received: " + msg )
-        return msg
+        if len(msg) > 0:
+            return messageHandler.decode_message( msg )
     
     def sendConnList( self, sock: socket.socket ):
         ''' Send a list of all of our connections'''
@@ -146,10 +162,10 @@ class netProc:
             logging.error( traceback.format_exc() )
             exit(-1)
 
-    def sendMsg( self, sock: socket.socket, msg : str ) -> bool:
+    def sendMsg( self, sock: socket.socket, msg : bytes ) -> bool:
         ''' Send a message through a socket corresponding to the nickname '''
         try:
-            sock.sendall( msg.encode() )
+            sock.sendall( msg )
             return True
         except Exception:
             # prints last exception and traceback to stderr
@@ -171,8 +187,7 @@ class client(netProc):
     def getAllSocks( self, nickName : int) -> Union[ str, bool]:
         ''' Sends msg to server @ nickName to send all known sockets back'''
         try:
-            sock = self.getSockByNickname( nickName )
-            return self.sendMsg( sock, "local_listSocks")
+            return self.sendMsg( self.socket, messageHandler.encode_message( Command.GET_DICT, "0") )
         except TimeoutError:
             return "ERR: Timeout"
         except Exception:
@@ -180,36 +195,43 @@ class client(netProc):
             return False
     
     def listenLoop( self ):
-        '''' Thread runs this function forever '''
+        ''' Thread runs this function '''
+        time.sleep(10)
+        print("I'M LISTENING")
         msg = self.readMsg( self.socket )
-        if( len(msg) > 0 ):
-            logging.debug(f"Client receved msg: {msg}")
-        
+        print("After listen")
+        if msg is not None:
+            print(msg)
+        time.sleep(10)
+        # TODO, use a reply scheme to figure out if client needs to take any action.
+        # i.e. update their local dictionary
+      
     def runLoop( self ):
         ''' Do all the client things '''
         # Connect to our local server process
         self.socket.connect( self.sInfo )
         # interactive console thread
-        self.cmdThread = threadPlus( shell(client=self).cmdloop() )
-        # self.cmdThread = threading.Thread( target = shell(client = self).cmdloop() )
-        # listen for server msgs and replies thread
+        sh = shell(client=self)
+        self.cmdThread = threadPlus( target = sh.cmdloop )
         # TODO: Better processing logic for listenThread?
-        # self.listenThread = threading.Thread( target = self.listenLoop() )
-        self.listenThread = threadPlus( self.listenLoop() )
-        
+        # listen for server msgs and replies
+        self.listenThread = threadPlus( target = self.listenLoop )
+        # TODO: GIL mutex is indeed a problem, and will not release the lock should listenthread get it
+        # resulting in the command terminal thread being locked out effectively.
+        # so um... we need to fix that...
         self.cmdThread.start()
         self.listenThread.start()
-       
+        
+        
         self.cmdThread.join()
         self.listenThread.join()
-        print( "Client run loop i shutting down now!" )
+        print( "Client is shutting down now!" )
         self.socket.close()
-        
-         
+            
 class server(netProc):
     def __init__(self, port: int ):
         super().__init__( port )
-
+        self.stop = False
         # listen to any IP, sending traffic to our port
         # assuming client and server both want to listen for now
         try:
@@ -223,21 +245,22 @@ class server(netProc):
 
     def runLoop( self ):
         ''' Do all the server things '''
-        self.acceptConn()
-        
-        while( True ):
-            self.readMsg(self.socket)
-        print("Server loop is running, shutting down now!")
-        self.shutDown()
 
-class Command(Enum):
-    GET_DICT = 0     # Client -> Server: Get nickname dictionary from server
-    SEND_MSG = 1     # Client -> Server: Send a message to someone else in the network
-    RECV_MSG = 2     # Server -> Client: A message has arrived for the client - pass it on
-    KNOCK = 3        # Knock
-    HEARTBEAT = 4    # Heartbeat
-    KILL_SERVER = 5  # Client -> Server: Kill the server process
-    KILL_NETWORK = 6 # Client -> Server, Server -> Server: Kill the entire network by sending the message to all other nodes
+        while not self.acceptConn():
+            pass
+        
+        while( self.stop == False ):
+            # NOTE: This might need to loop through the connection dictionary of sockets to actually read anything
+            # right now we just read from the client socket
+            
+            msg = self.readMsg( self.connections[ self.nicknames[0] ] )
+            if msg is not None: pprint.pprint(msg)
+            # NOTE: Logic needed
+            # 1. Recongize kill command, by setting self.stop
+            # 2. Any external messaging commands
+            # 3. All the other commands like knock, get_dict, etc.
+        print("Server shutting down now!")
+        self.shutDown()
 
 class messageHandler():
     # TODO: write functions
@@ -255,19 +278,31 @@ class messageHandler():
     def __init__(self):
         pass
     
-    def encode_message(self, command: Command, data: str = "") -> bytes:
+    @staticmethod
+    def encode_message( command: Command, *args ) -> bytes:
         '''Turn a command and data into the encoded format [length of command + data]:[command][data]'''
-        contents: str = str(command.value) + data
+        # Might need standard format for seperating arguments in the data field.
+        
+        contents: str = str(command.value)
+        
+        for idx, arg in enumerate(args):
+            contents += str( arg )
+            if idx != len(args) - 1:
+                contents += ASEP
+        
         return (str(len(contents)) + ":" + contents).encode()
     
-    def decode_message(self, message: bytes) -> tuple[Command, str]:
+    @staticmethod
+    def decode_message( message: bytes) -> tuple [Command, list ]:
         '''Turn the encoded format [length of command + data]:[command][data] into (command, data); Also checks the length'''
         m: str = message.decode()
-        length: int = int(m.split(":")[0])
-        m = m.split(":")[1]
+        length: int = int(m.split(":", 1)[0])
+        m = m.split(":", 1)[1]
         if len(m) != length:
             raise RuntimeError("Length of received message doesn't match expected length!")
-        return (Command(int(m[0])), m[1:] if len(m) > 1 else "")
+        comm = Command(int(m[0]))
+        args = m[1:].split(ASEP)
+        return comm, args
 
 # This might be a 3rd process, or its part of the client process. If that's the case
 # maybe all socket communcation should be done through the server process, so we ensure nothing
@@ -290,23 +325,22 @@ class shell(cmd.Cmd):
         self.client.cmdThread.stop()
     
     def do_listSockets(self, sockNickname : str ):
-        '''Pools server to return list of sockets <nickname: int | none>'''
-        sockNick = int( sockNickname )
-        if sockNickname is None: sockNick = 0
+        '''Polls server to return list of sockets <nickname: int | none>'''
+        
+        # assume they mean to ask local server
+        if sockNickname == '': sockNick = 0
+        else: sockNick = int( sockNickname )
         
         if not self.client.nicknameExists( sockNick ):
             print( f" ERR: Nickname {sockNick} is not an existing socket!")
-            
-        sock = self.client.getAllSocks( sockNick )
-        if( sock == False ):
-            print(" ERR: Polling server failed")
-        else:
-            pprint.pp(sock)
+        # NOTE: Currently, no support for chained commands like getting a dict from a non-local server
+        # NOTE: Also need a reply scheme, since replies may come in different order then expected
+        self.client.socket.sendall( messageHandler.encode_message(Command.GET_DICT,"0") )
        
     def do_makeConnection(self, ipAddr : str, port : int ):
         ''' Connect to a given ipaddress or host'''
         # Sends msg to local server to forward this message to the corresponding socket
-        self.client.sendMsg( self.client.socket, f"Knock: {ipAddr},{port}\n")
+        self.client.sendMsg( self.client.socket,messageHandler.encode_message(Command.KNOCK, ipAddr, port) )
 
     # NOTE: cmd.cmd, may pass args as a single string.
     def do_sendMsg(self, sockNickname : str, msg : str ):
@@ -315,7 +349,7 @@ class shell(cmd.Cmd):
         if not self.client.nicknameExists( sockNick ):
             print( f" ERR: Nickname {sockNick} is not an existing socket!")
         # Sends msg to local server to forward this message to the corresponding socket
-        self.client.sendMsg( self.client.socket, f"sendMsg: {msg} \ntarget: {sockNick} ")
+        self.client.sendMsg( self.client.socket, messageHandler.encode_message(Command.SEND_MSG, sockNickname, msg) )
      
 # script guard, things in this script don't run automatically when imported
 if __name__ == "__main__":
