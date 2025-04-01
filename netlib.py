@@ -32,14 +32,14 @@ logging.basicConfig(level=logging.DEBUG)
 class threadPlus ( threading.Thread ):
     ''' Thread wrapper to externally killed in a safe manner'''
     def __init__(self, *args, **kwargs) -> None:
-        super(threadPlus, self).__init__(*args, **kwargs)
+        super( threadPlus, self ).__init__(*args, **kwargs)
         self.stopFlag = threading.Event()
         
     def run( self ):
         ''' Run in a forver loop until stop flag is set'''
-        print(" HEY I AM IN THE THREADPLUS RUN")
         while not self.stopFlag.isSet():
-            self._target( *self._args, **self._kwargs )
+            # NOTE: VSC can't see it, but parent class variables are in scope. So we're just gonna ignore the error
+            self._target( *self._args, **self._kwargs ) # type: ignore
     
     def stop(self):
         ''' Set stop flag '''
@@ -158,7 +158,7 @@ class netProc:
                 logging.error( traceback.format_exc() )
             
         if len(msg) > 0:
-            logging.debug(f"Returning message: {msg}")
+            # logging.debug(f"Returning message: {msg}")
             return messageHandler.decode_message( msg )
         else:
             return None
@@ -211,13 +211,10 @@ class client(netProc):
     
     def listenLoop( self ):
         ''' Thread runs this function '''
-        time.sleep(10)
-        print("I'M LISTENING")
         msg = self.readMsg( self.socket )
-        print("After listen")
         if msg is not None:
             print(msg)
-        time.sleep(10)
+            
         # TODO, use a reply scheme to figure out if client needs to take any action.
         # i.e. update their local dictionary
       
@@ -227,18 +224,16 @@ class client(netProc):
         self.socket.connect( self.sInfo )
         # interactive console thread
         sh = shell(client=self)
-        self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread", daemon = True )
+        self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
         # TODO: Better processing logic for listenThread?
         # listen for server msgs and replies
-        self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread" )
-        # TODO: GIL mutex is indeed a problem, and will not release the lock should listenthread get it
-        # resulting in the command terminal thread being locked out effectively.
-        # so um... we need to fix that...
-        self.cmdThread.start()
-        # NOTE: commented out listenthread for cmdline testing.
+        self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread", daemon = True )
+
         self.listenThread.start()
+        self.cmdThread.start()
         
-        self.listenThread.join()
+        self.cmdThread.join()
+        
         print( "Client is shutting down now!" )
         self.socket.close()
         exit( 0 )
@@ -276,7 +271,7 @@ class server(netProc):
             # NOTE: assuming that a valid socket is the first argument a command has
             msg = self.readMsg( self.connections[ self.nicknames[0] ] )
             if msg is not None:
-                logging.debug(f"Read msg: {msg}")
+                # logging.debug(f"Read msg: {msg}")
                 match( msg[COM] ):
                     case Command.KILL_SERVER:
                         logging.debug("server shutting down")
@@ -307,6 +302,7 @@ class server(netProc):
                             self.sendMsg( sock, messageHandler.encode_message(Command.HEARTBEAT, "-1") )
                                
                     case default:
+                        logging.debug("DEFAULT CASE REACHED, command is:")
                         pprint.pprint(msg)
                     
             # NOTE: Logic needed
@@ -373,7 +369,7 @@ class shell(cmd.Cmd):
         '''Default behavior when command is not recongized'''
         print(f"ERR: {line} is an unrecongized command or an incomplete argument")
         
-    def do_quit(self, line):
+    def do_quit( self ):
         '''exits the shell & terminates client'''
         # bring down listen thread on quit
         self.client.listenThread.stop()
