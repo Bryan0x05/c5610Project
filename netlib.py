@@ -6,7 +6,7 @@ import logging
 import cmd
 import pprint
 from typing import Union
-import sys
+import re
 import threading
 from enum import Enum
 import time
@@ -64,13 +64,14 @@ class netProc:
         # this is blocking! It'll wait until someone tries to talk to us!
         try:
             conSock, addrAndPort = self.socket.accept()
-            logging.debug(f"Connected accepted on {addrAndPort}")
+            logging.debug(f"Connected accepted on {addrAndPort}, nickname: {self.conID}")
             self.nicknames[ self.conID ] = ( addrAndPort )
             self.conID += 1
             self.connections[ ( addrAndPort ) ] = conSock
             conSock.setblocking(False)
             conSock.settimeout(5)
             conSock.sendall( messageHandler.encode_message(Command.HEARTBEAT, "Socket alive on: ", *addrAndPort)  )
+            return True
         except BlockingIOError:
             # logging.error( traceback.format_exc() ) # uncomment this at your own sanity
             return False
@@ -80,8 +81,6 @@ class netProc:
         except Exception:
             logging.error( traceback.format_exc() )
             return False
-        
-        return True
         
     def connectToHost( self, hostName: str, port: int ) -> bool:
        ''' Connects by host name e.g. www.google.com '''
@@ -114,9 +113,6 @@ class netProc:
     def getSockByNickname( self, nickname: int ) -> socket.socket:
         ''' Returns the socket object associated with the nickname'''
         try:
-            if nickname == 0:
-                return self.socket
-            
             return self.connections[ self.nicknames[ nickname ] ]
         except Exception:
             logging.error( traceback.format_exc() )
@@ -144,7 +140,7 @@ class netProc:
         msg : bytes = bytes()
         incMsg : bytes = bytes()
         try:
-            while len(incMsg := sock.recv(1024)) > 0:
+            while len( incMsg := sock.recv(1024) ) > 0:
                     msg += incMsg
         except TimeoutError: # Treating timeout as an async try again error
                 # As a result, this will spam stdout.
@@ -155,7 +151,7 @@ class netProc:
             logging.warning( traceback.format_exc() )
             self.stop = True
         except Exception:
-                logging.error( traceback.format_exc() )
+            logging.error( traceback.format_exc() )
             
         if len(msg) > 0:
             # logging.debug(f"Returning message: {msg}")
@@ -211,9 +207,25 @@ class client(netProc):
     
     def listenLoop( self ):
         ''' Thread runs this function '''
+        COM = 0
+        ARG = 1
         msg = self.readMsg( self.socket )
         if msg is not None:
-            print(msg)
+            logging.debug(f"Client read msg: {msg}")
+            match msg[COM]:
+                case Command.GET_DICT:
+                    # print whole dictionary to stdout
+                    print(msg[ARG][:])
+                    # update our local nickname dictionary
+                    for argI in range(0, len(msg[ARG]) ):
+                        # break up the key and value, and add them to our dictionary
+                        eleList: list[str] = re.findall( "[0-9][.]?[0-9]?[.]?[0-9]?[.]?[0-9]?[.]?[0-9]?" ,msg[ARG][argI] )
+                        # 0: sock nickname, 1: ipAddr,  2: port
+                        self.nicknames[ int(eleList[0]) ] = ( eleList[1], int(eleList[2]) )
+                    
+                case default:
+                    print("Client default case reached:")
+                    pprint.pp(msg)
             
         # TODO, use a reply scheme to figure out if client needs to take any action.
         # i.e. update their local dictionary
@@ -227,13 +239,13 @@ class client(netProc):
         self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
         # TODO: Better processing logic for listenThread?
         # listen for server msgs and replies
-        self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread", daemon = True )
+        self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread" )
 
         self.listenThread.start()
         self.cmdThread.start()
         
         self.cmdThread.join()
-        
+        self.listenThread.join()
         print( "Client is shutting down now!" )
         self.socket.close()
         exit( 0 )
@@ -251,27 +263,23 @@ class server(netProc):
             exit(-1)
         # OS should manage this queue, so its non-blocking
         self.socket.listen( 5 )
-
-    def sendNicknames( self, socket : socket.socket ):
-        ''' Send our copy of the nickname dictionary to the provided socket'''
-        msg: bytes = messageHandler.encode_message(Command.GET_DICT, *[ nick for nick in self.nicknames.items() ] )
-        if( not self.sendMsg( socket, msg ) ):
-            print("EER: Failed to send Nickname dictionary")
         
     def runLoop( self ):
         ''' Do all the server things '''
+        COM = 0
+        ARGS = 1
         # connect to our local client before anything else
         while not self.acceptConn():
             pass
-        
-        while( self.stop == False ):
-            COM = 0
-            ARGS = 1
 
-            # NOTE: assuming that a valid socket is the first argument a command has
-            msg = self.readMsg( self.connections[ self.nicknames[0] ] )
+        while( self.stop == False ):
+            # NOTE: Assume the first argument is a socket
+
+            msg = self.readMsg( self.getSockByNickname( 0 ) )
+            
             if msg is not None:
-                # logging.debug(f"Read msg: {msg}")
+                logging.debug(f"Server read msg: {msg}")
+                # TODO: Finish this logic
                 match( msg[COM] ):
                     case Command.KILL_SERVER:
                         logging.debug("server shutting down")
@@ -300,15 +308,16 @@ class server(netProc):
                             # i.e. do not reply to my reply of your heartbeat message.
                             continue # Code not ready for real topology stuff
                             self.sendMsg( sock, messageHandler.encode_message(Command.HEARTBEAT, "-1") )
-                               
-                    case default:
-                        logging.debug("DEFAULT CASE REACHED, command is:")
-                        pprint.pprint(msg)
                     
-            # NOTE: Logic needed
-            # 1. Recongize kill command, by setting self.stop
-            # 2. Any external messaging commands
-            # 3. All the other commands like knock, get_dict, etc.
+                    case Command.GET_DICT:
+                        sock : socket.socket =  self.getSockByNickname( int( msg[ARGS][0] ) )
+                        self.sendMsg( sock, messageHandler.encode_message( Command.GET_DICT,
+                            *[nick for nick in self.nicknames.items( )]) )
+                        
+                    case default:
+                        logging.debug("Server default case reached:")
+                        pprint.pprint(msg)
+
         print("Server shutting down now!")
         self.shutDown()
 
@@ -333,13 +342,13 @@ class messageHandler():
         '''Turn a command and data into the encoded format [length of command + data]:[command][data1|data2]'''
         # Might need standard format for seperating arguments in the data field.
         contents: str = str(command.value)
-        
+  
         for idx, arg in enumerate(args):
             contents += str( arg )
             if idx < len(args) - 1:
                 contents += ASEP
         
-        return (str(len(contents)) + ":" + contents).encode()
+        return ( str ( len ( contents ) ) + ":" + contents ).encode()
     
     @staticmethod
     def decode_message( message: bytes) -> tuple [Command, list ]:
@@ -369,7 +378,7 @@ class shell(cmd.Cmd):
         '''Default behavior when command is not recongized'''
         print(f"ERR: {line} is an unrecongized command or an incomplete argument")
         
-    def do_quit( self ):
+    def do_quit( self, _ ):
         '''exits the shell & terminates client'''
         # bring down listen thread on quit
         self.client.listenThread.stop()
@@ -383,6 +392,9 @@ class shell(cmd.Cmd):
     def do_listSockets(self, line : str ):
         '''Polls server to return list of sockets <nickname: int | none>'''
         args = line.split()
+        # if no arg provided, assume local server is the target
+        if len(args) == 0: args.append( '0' )
+        
         sockNickname = args[0]
         # assume they mean to ask local server
         if sockNickname == '': sockNick = 0
