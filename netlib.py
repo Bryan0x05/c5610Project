@@ -31,18 +31,15 @@ logging.basicConfig(level=logging.DEBUG)
 
 class threadPlus ( threading.Thread ):
     ''' Thread wrapper to externally killed in a safe manner'''
-    def __init__(self, target, name, group = None, args=(),**kwargs ) -> None:
-        super().__init__( group, target, name, args, kwargs, daemon=None )
-        self.target = target
-        self.args = args
-        self.kwargs = kwargs
+    def __init__(self, *args, **kwargs) -> None:
+        super(threadPlus, self).__init__(*args, **kwargs)
         self.stopFlag = threading.Event()
         
     def run( self ):
         ''' Run in a forver loop until stop flag is set'''
         print(" HEY I AM IN THE THREADPLUS RUN")
-        while self.stopFlag:
-            self.target( *self.args, **self.kwargs )
+        while not self.stopFlag.isSet():
+            self._target( *self._args, **self._kwargs )
     
     def stop(self):
         ''' Set stop flag '''
@@ -230,7 +227,7 @@ class client(netProc):
         self.socket.connect( self.sInfo )
         # interactive console thread
         sh = shell(client=self)
-        self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
+        self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread", daemon = True )
         # TODO: Better processing logic for listenThread?
         # listen for server msgs and replies
         self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread" )
@@ -239,10 +236,9 @@ class client(netProc):
         # so um... we need to fix that...
         self.cmdThread.start()
         # NOTE: commented out listenthread for cmdline testing.
-        # self.listenThread.start()
+        self.listenThread.start()
         
-        self.cmdThread.join()
-       #  self.listenThread.join()
+        self.listenThread.join()
         print( "Client is shutting down now!" )
         self.socket.close()
         exit( 0 )
