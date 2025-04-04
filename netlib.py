@@ -10,11 +10,13 @@ import re
 import threading
 from enum import Enum
 import time
+import sys
 # import colorama # for different colored text to help tell apart certain messages
 # import curses # linux based module for terminal formatting
 
 # argument seperator
 ASEP = "|"
+PROMPT = "shell>"
 
 class Command(Enum):
     GET_DICT = 0     # Client -> Server: Get nickname dictionary from server
@@ -24,7 +26,7 @@ class Command(Enum):
     HEARTBEAT = 4    # Heartbeat
     KILL_SERVER = 5  # Client -> Server: Kill the server process
     KILL_NETWORK = 6 # Client -> Server, Server -> Server: Kill the entire network by sending the message to all other nodes
-
+    GET_IPS = 7
 # might be excessive for what we're doing but the idea is we don't have to find debug prints later
 # and remove them, we can just change the logging level.
 logging.basicConfig(level=logging.DEBUG)
@@ -56,7 +58,7 @@ class netProc:
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         self.socket.setblocking(False)
-        self.socket.settimeout(5)
+        self.socket.settimeout(2)
         self.stop = False
 
     def acceptConn( self ) -> bool:
@@ -69,8 +71,9 @@ class netProc:
             self.conID += 1
             self.connections[ ( addrAndPort ) ] = conSock
             conSock.setblocking(False)
-            conSock.settimeout(5)
-            conSock.sendall( messageHandler.encode_message(Command.HEARTBEAT, "Socket alive on: ", *addrAndPort)  )
+            conSock.settimeout(2)
+            # S = sending a heartbeat, R = requesting a heartbeat
+            conSock.sendall( messageHandler.encode_message(Command.HEARTBEAT, "S", *addrAndPort)  )
             return True
         except BlockingIOError:
             # logging.error( traceback.format_exc() ) # uncomment this at your own sanity
@@ -135,7 +138,8 @@ class netProc:
         for idx, key in enumerate( self.nicknames ):
             print("{idx}. {key} => {self.nicknames[key]} ") 
     
-    def readMsg( self, sock : socket.socket ) -> Union[ tuple[ Command, list[ str ] ], None ]:
+    @staticmethod
+    def readMsg( sock : socket.socket ) -> Union[ tuple[ Command, list[ str ] ], None ]:
         ''' Read a socket message '''
         msg : bytes = bytes()
         incMsg : bytes = bytes()
@@ -146,10 +150,8 @@ class netProc:
                 # As a result, this will spam stdout.
                 # logging.warning( traceback.format_exc() )
                 pass
-        # if someone shutdown the connection, bring yourself down
         except ConnectionResetError:
             logging.warning( traceback.format_exc() )
-            self.stop = True
         except Exception:
             logging.error( traceback.format_exc() )
             
@@ -159,20 +161,14 @@ class netProc:
         else:
             return None
         
-    # TODO: Get connList may not work as intended, as it'll give the ipaddr + port
-    # of servers sockets that are target to the specific node of the sender
-    # instead, we should poll the network for the ipAddr and Port of their server
-    # listening sockets.
-    def sendConnList( self, sock: socket.socket ):
-        ''' Send a list of all of our connections'''
-        peers: list[str] = [ "{ip}:{port}" for ( ip, port ) in self.connections.keys() ]
-        try:
-            sock.send( ",".join(peers).encode() )
-        except Exception:
-            logging.error( traceback.format_exc() )
-            exit(-1)
+    def sendConnIps( self, sock: socket.socket ):
+        ''' Send a list of all ip addrs we are connected to'''
+        peers: list[str] = [ ip for ( ip, _ ) in self.connections.keys() ]
+        # S = sending, as in sending the info, R = requesting, requesting the info
+        netProc.sendMsg( sock, messageHandler.encode_message(Command.GET_IPS, "S", *peers) )
 
-    def sendMsg( self, sock: socket.socket, msg : bytes ) -> bool:
+    @ staticmethod
+    def sendMsg( sock: socket.socket, msg : bytes ) -> bool:
         ''' Send a message through a socket corresponding to the nickname '''
         try:
             sock.sendall( msg )
@@ -198,7 +194,7 @@ class client(netProc):
     def getAllSocks( self, nickName : int) -> Union[ str, bool]:
         ''' Sends msg to server @ nickName to send all known sockets back'''
         try:
-            return self.sendMsg( self.socket, messageHandler.encode_message( Command.GET_DICT, "0") )
+            return netProc.sendMsg( self.socket, messageHandler.encode_message( Command.GET_DICT, "0") )
         except TimeoutError:
             return "ERR: Timeout"
         except Exception:
@@ -209,13 +205,14 @@ class client(netProc):
         ''' Thread runs this function '''
         COM = 0
         ARG = 1
-        msg = self.readMsg( self.socket )
+        msg = netProc.readMsg( self.socket )
         if msg is not None:
             logging.debug(f"Client read msg: {msg}")
             match msg[COM]:
                 case Command.GET_DICT:
                     # print whole dictionary to stdout
                     print(msg[ARG][:])
+                    print(PROMPT, end="", flush=True)
                     # update our local nickname dictionary
                     for argI in range(0, len(msg[ARG]) ):
                         # break up the key and value, and add them to our dictionary
@@ -226,6 +223,7 @@ class client(netProc):
                 case default:
                     print("Client default case reached:")
                     pprint.pp(msg)
+                    print( PROMPT, end="", flush=True )
             
         # TODO, use a reply scheme to figure out if client needs to take any action.
         # i.e. update their local dictionary
@@ -237,7 +235,7 @@ class client(netProc):
         # interactive console thread
         sh = shell(client=self)
         self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
-        # TODO: Better processing logic for listenThread?
+
         # listen for server msgs and replies
         self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread" )
 
@@ -256,6 +254,9 @@ class server(netProc):
         # listen to any IP, sending traffic to our port
         # assuming client and server both want to listen for now
         try:
+            # Allow socket re-use to get around linux wait state
+            # basically lets you spam run the script without changing the port numbers in Linux.
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind( ( '', port ) )
             print(f"listening on port: {port}")
         except:
@@ -263,7 +264,15 @@ class server(netProc):
             exit(-1)
         # OS should manage this queue, so its non-blocking
         self.socket.listen( 5 )
-        
+
+    def checkForMsgs( self ):
+        ''' Check for a message from all our sockets, returning the first one found'''
+        for _, sock in self.connections.items():
+            msg = netProc.readMsg( sock )
+            if msg is not None:
+                return msg
+        return None
+
     def runLoop( self ):
         ''' Do all the server things '''
         COM = 0
@@ -275,7 +284,7 @@ class server(netProc):
         while( self.stop == False ):
             # NOTE: Assume the first argument is a socket
 
-            msg = self.readMsg( self.getSockByNickname( 0 ) )
+            msg = self.checkForMsgs()
             
             if msg is not None:
                 logging.debug(f"Server read msg: {msg}")
@@ -288,35 +297,67 @@ class server(netProc):
                     
                     case Command.KILL_NETWORK:
                         logging.debug("server killing network")
-                        # TODO: Broadcast the killnetwork message, likley with a broadcast function
+                        for _, sock in self.connections.items():
+                            netProc.sendMsg( sock, messageHandler.encode_message( Command.KILL_NETWORK ) )
                         # close all our sockets
                         self.shutDown()
 
                     case Command.SEND_MSG:
                         nick = int( msg[ARGS][0] )
-                        continue # DEV: code is not built to handle server replies to client yet.
                         if not self.nicknameExists( nick ):
-                            self.sendMsg( self.getSockByNickname( 0 ), "ERR: Nickname doesn't exist " )
-                            continue      
-                        sock : socket.socket = self.getSockByNickname( nick )
-                        self.sendMsg( sock, " ".join(msg[ARGS][1:]).encode() )
+                            netProc.sendMsg( self.getSockByNickname( 0 ),
+                                          messageHandler.encode_message(Command.SEND_MSG,"ERR: Recevier not in network!") )
+                            continue
+                        netProc.sendMsg( self.getSockByNickname( nick ), " ".join(msg[ARGS][1:]).encode() )
 
                     case Command.HEARTBEAT:
-                        if int( msg[ARGS][0] ) > -1:
+                        # Someone is asking us to send a heartbeat
+                        if  msg[ARGS][0] == "R":
                             sock : socket.socket = self.getSockByNickname( int( msg[ARGS][0] ) )
-                            # putting -1, means I'm not providing a valid socket for the receiver to reply to.
-                            # i.e. do not reply to my reply of your heartbeat message.
-                            continue # Code not ready for real topology stuff
-                            self.sendMsg( sock, messageHandler.encode_message(Command.HEARTBEAT, "-1") )
-                    
+                            netProc.sendMsg( sock, messageHandler.encode_message(Command.HEARTBEAT, "S", self.getMyIpAddr(), self.port) )
+                        else: # S, someone is telling us their heartbeat
+                            # print ipaddr, port
+                            print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
+                            print( PROMPT, end="", flush = True )
+
                     case Command.GET_DICT:
-                        sock : socket.socket =  self.getSockByNickname( int( msg[ARGS][0] ) )
-                        self.sendMsg( sock, messageHandler.encode_message( Command.GET_DICT,
+                        sock : socket.socket =  self.getSockByNickname( int( msg[ ARGS ][ 0 ] ) )
+                        netProc.sendMsg( sock, messageHandler.encode_message( Command.GET_DICT,
                             *[nick for nick in self.nicknames.items( )]) )
-                        
+                    
+                    case Command.KNOCK:
+                        ipAddr =  msg[ ARGS ][ 0 ]
+                        port =  int( msg[ ARGS ][ 1 ] )
+                        print(f"knock args: {ipAddr}:{port}")
+                        if self.connectToIp( ipAddr, port ):
+                            print( "Connected to: {ipAddr}:{port}" )
+                        else:
+                            print( "ERR: Failed to connect to {ipAddr}:{port}" )
+                        print( PROMPT, end="", flush= True )
+
+                    case Command.GET_IPS:
+                        # requesting us to give the list
+                        if msg[ ARGS ][ 0 ] == "R":
+                            self.sendConnIps( self.getSockByNickname( int( msg[ ARGS ][ 1 ]) ) )
+                        # sending us a list
+                        if msg[ ARGS ][ 0 ] == "S":
+                            ips = msg[ ARGS ][ 1: ]
+                            # NOTE: Might want to chance this, but for now auto-connect to those ips
+                            keys = self.connections.keys()
+                            ipAddrs = [ key[0] for key in keys ]
+                            for ip in ips:
+                                if  ip not in ipAddrs:
+                                    # NOTE: Might want to use a different port? and/or retry on failure?
+                                    if self.connectToIp( ip, self.port ):
+                                        print(f"Connection made to: {ip}:{self.port}")
+                                    else:
+                                        print(f"ERR: Failed to connect to: {ip}:{self.port}")
+                            print( PROMPT, end="", flush=True )
+
                     case default:
                         logging.debug("Server default case reached:")
                         pprint.pprint(msg)
+                        print( PROMPT, end="", flush=True )
 
         print("Server shutting down now!")
         self.shutDown()
@@ -368,11 +409,12 @@ class messageHandler():
 # and the user only interacts with the client portion?
 class shell(cmd.Cmd):
     intro = "Type help to get started\n"
-    prompt = "shell>"
+    prompt = PROMPT
     # TODO: Utilize messageHandler instead of directly sending byte coded strings
-    def __init__(self, client : client ):
+    def __init__(self, client : client, spin : bool = True ):
         super().__init__()
         self.client = client
+        self.spin = spin
     
     def default( self, line ):
         '''Default behavior when command is not recongized'''
@@ -387,7 +429,7 @@ class shell(cmd.Cmd):
         # send msg to our local server
         self.client.socket.sendall( messageHandler.encode_message(Command.KILL_SERVER,"0") )
         print("Exiting...")
-        exit(0)
+        return True
     
     def do_listSockets(self, line : str ):
         '''Polls server to return list of sockets <nickname: int | none>'''
@@ -402,12 +444,10 @@ class shell(cmd.Cmd):
         
         if not self.client.nicknameExists( sockNick ):
             print( f" ERR: Nickname {sockNick} is not an existing socket!")
-        # NOTE: Currently, no support for chained commands like getting a dict from a non-local server
-        # NOTE: Also need a reply scheme, since replies may come in different order then expected
-        self.client.socket.sendall( messageHandler.encode_message(Command.GET_DICT,"0") )
-       
-    def do_makeConnection(self, line: str):
-        ''' Connect to a given ipaddress or host'''
+        self.client.sendMsg( self.client.socket, messageHandler.encode_message(Command.GET_DICT,"0") )
+        
+    def do_makeConn(self, line: str):
+        ''' Connect to a given < ipAddr(x.x.x.x) > < port >'''
         try:
             args = line.split()
             ipAddr = args[0]
@@ -432,6 +472,15 @@ class shell(cmd.Cmd):
             print( f" ERR: Nickname {sockNick} is not an existing socket!")
         # Sends msg to local server to forward this message to the corresponding socket
         self.client.sendMsg( self.client.socket, messageHandler.encode_message(Command.SEND_MSG, sockNick, msg) )
+
+    def spinAnimation(self):
+        if self.spin == False:
+            return
+        spinner = ['|', '/', '-', '\\']
+        for symbol in spinner:
+            print(f'\r{symbol} Waiting...', flush=True)
+            time.sleep(0.1)
+
      
 # script guard, things in this script don't run automatically when imported
 if __name__ == "__main__":

@@ -5,7 +5,8 @@ import time
 # requires a script guard, since spawn reimports modules
 if __name__ == '__main__':
     server = netlib.server( port = 65535 )
-    client = netlib.client( port = 65525, sInfo=( server.getMyIpAddr(), 65535 ) )
+    # using localhost over local ip address has performance benefits
+    client = netlib.client( port = 65525, sInfo=( 'localhost', 65535 ) )
 
     # create procs
     sProc = multiprocessing.Process( target = server.runLoop, name="server proc" )
@@ -14,7 +15,7 @@ if __name__ == '__main__':
     # start procs
     sProc.start()
     # cProc.start()
-    
+    # give time for server to spin up
     time.sleep(1)
     # cmdloop() had stdin issues running a new process
     client.runLoop()
