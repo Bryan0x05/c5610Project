@@ -1,4 +1,5 @@
 from imaplib import Commands
+import multiprocessing.connection
 import socket
 import typing
 import traceback
@@ -10,7 +11,10 @@ import re
 import threading
 from enum import Enum
 import time
-import sys
+import os
+import subprocess
+import pty
+import multiprocessing
 # import colorama # for different colored text to help tell apart certain messages
 # import curses # linux based module for terminal formatting
 
@@ -26,8 +30,7 @@ class Command(Enum):
     KILL_SERVER = 5  # Client -> Server: Kill the server process
     KILL_NETWORK = 6 # Client -> Server, Server -> Server: Kill the entire network by sending the message to all other nodes
     GET_IPS = 7
-# might be excessive for what we're doing but the idea is we don't have to find debug prints later
-# and remove them, we can just change the logging level.
+
 logging.basicConfig(level=logging.DEBUG)
 
 class threadPlus ( threading.Thread ):
@@ -41,7 +44,7 @@ class threadPlus ( threading.Thread ):
         while not self.stopFlag.isSet():
             # NOTE: VSC can't see it, but parent class variables are in scope. So we're just gonna ignore the error
             self._target( *self._args, **self._kwargs ) # type: ignore
-    
+        
     def stop(self):
         ''' Set stop flag '''
         self.stopFlag.set()
@@ -59,13 +62,24 @@ class netProc:
         self.socket.setblocking(False)
         self.socket.settimeout(2)
         self.stop = False
-
+        self.proc = None
+    
+    @staticmethod
+    def getPort( sock : socket.socket ) -> int:
+        ''' get's a socket port number'''
+        return sock.getsockname()[1]
+    
+    @staticmethod
+    def getIp( sock : socket.socket ) -> str:
+        '''Gets a socket's ip address'''
+        return sock.getsockname()[0]
+    
     def acceptConn( self ) -> bool:
         ''' Accept a socket connection, warning this is blocking by default'''
         # this is blocking! It'll wait until someone tries to talk to us!
         try:
             conSock, addrAndPort = self.socket.accept()
-            logging.debug(f"Connected accepted on {addrAndPort}, nickname: {self.conID}")
+            print(f"Connected accepted on {addrAndPort}, nickname: {self.conID}")
             self.nicknames[ self.conID ] = ( addrAndPort )
             self.conID += 1
             self.connections[ ( addrAndPort ) ] = conSock
@@ -78,10 +92,10 @@ class netProc:
             # logging.error( traceback.format_exc() ) # uncomment this at your own sanity
             return False
         except TimeoutError:
-            logging.warning("timeout in accept connection")
+            # logging.warning("timeout in accept connection")
             return False
         except Exception:
-            logging.error( traceback.format_exc() )
+            # logging.error( traceback.format_exc() )
             return False
         
     def connectToHost( self, hostName: str, port: int ) -> bool:
@@ -107,10 +121,7 @@ class netProc:
             # prints last exception and traceback to stderr
             logging.error( traceback.format_exc() )
             return False
-    
-    def getMyIpAddr( self ) -> str:
-        '''...gets my own ip address'''
-        return socket.gethostbyname( socket.gethostname() )
+
     
     def getSockByNickname( self, nickname: int ) -> socket.socket:
         ''' Returns the socket object associated with the nickname'''
@@ -134,8 +145,10 @@ class netProc:
 
     def listAllConns( self ):
         ''' List all socket connections in <nickname> => <ip>:<port> format'''
+        conns = []
         for idx, key in enumerate( self.nicknames ):
-            print("{idx}. {key} => {self.nicknames[key]} ") 
+            conns.append( f"{idx}. {key} => {self.nicknames[key]}" )
+        return conns
     
     @staticmethod
     def readMsg( sock : socket.socket ) -> Union[ tuple[ Command, list[ str ] ], None ]:
@@ -186,29 +199,17 @@ class netProc:
         for key, sock in self.connections.items():
             sock.shutdown(socket.SHUT_RDWR)
             sock.close()
+        self.socket.close()
         exit(0)
 
 class peer(netProc):
-    def __init__(self, port: int, input = None, output = None ):
+    def __init__(self, port: int = 0, name: str = "_", subProc = False, debug = False, test = True):
         super().__init__( port )
-        if input is not None:
-            sys.stdin = input
-        
-        if output is not None:
-            sys.stdout = output
-        # listen to any IP, sending traffic to our port
-        # assuming client and server both want to listen for now
-        try:
-            # Allow socket re-use to get around linux wait state
-            # basically lets you spam run the script without changing the port numbers in Linux.
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind( ( '', port ) )
-            print(f"listening on port: {port}")
-        except:
-            logging.error( traceback.format_exc() )
-            exit(-1)
-        # OS should manage this queue, so its non-blocking
-        self.socket.listen( 5 )
+        self.name = name
+        self.port = port
+        self.subProc = subProc
+        self.test = test
+        ( logging.getLogger() ).disabled = not debug
     
     def checkForMsgs( self ):
         ''' Check for a message from all our sockets, returning the first one found'''
@@ -220,7 +221,7 @@ class peer(netProc):
 
     def runLoop( self ):
         ''' Do all the client things '''
-        
+            
         # interactive console thread
         sh = shell(peer=self)
         self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
@@ -234,19 +235,22 @@ class peer(netProc):
         self.cmdThread.join()
         self.listenThread.join()
         print( "Peer is shutting down now!" )
-        self.socket.close()
-        exit( 0 )
-    
+        self.up = False
+        self.shutDown()
+
     def listenLoop( self ):
         ''' Do all the server/client things '''
         COM = 0
         ARGS = 1
         
-        # NOTE: Assume the first argument is a socket
+        # see if there are any new connections
+        self.acceptConn()
+        # see if there are any new messages on existing connections
         msg = self.checkForMsgs()
         
         if msg is not None:
             logging.debug(f"Server read msg: {msg}")
+            print(f"Server read msg: {msg}")
             # TODO: Finish this logic
             match( msg[COM] ):
                 case Command.KILL_SERVER:
@@ -258,11 +262,11 @@ class peer(netProc):
                 case Command.SEND_MSG:
                     nick = int( msg[ARGS][0] )
                     self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
-                
         
                 case Command.RECV_MSG:
-                    msg = msg[ARGS][0]
+                    msg = msg[ARGS]
                     print( msg )
+                    self.lastRecv = msg
                     
                 case Command.HEARTBEAT:
                     # Someone is asking us to send a heartbeat
@@ -296,9 +300,6 @@ class peer(netProc):
                 case default:
                     logging.debug("Server default case reached:")
                     pprint.pprint(msg)
-
-        # print("Server shutting down now!")
-        # self.shutDown()
         
     def kill_peer(self) -> bool:
         logging.debug("peer shutting down")
@@ -315,9 +316,8 @@ class peer(netProc):
         return True
         
     def heartbeat_request(self, nickname) -> bool:
-        return self.sendMsg(nickname, messageHandler.encode_message(Command.HEARTBEAT, "S", self.getMyIpAddr(), self.port) )
+        return self.sendMsg(nickname, messageHandler.encode_message(Command.HEARTBEAT, "S", self.ip, self.port) )
          
-
     def knock(self, ip_addr, port) -> bool:
         print(f"knock args: {ip_addr}:{port}")
         if self.connectToIp( ip_addr, port ):
@@ -327,6 +327,59 @@ class peer(netProc):
             print( f"ERR: Failed to connect to {ip_addr}:{port}" )
             return False
 
+    def start( self ) :
+        ''' Bind the socket and start the peer '''
+        self.up = True
+        try:
+            # Allow socket re-use to get around linux wait state
+            # basically lets you spam run the script without changing the port numbers in Linux.
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind( ( '', self.port ) )
+            # if port = 0, the OS picks one for us, and we find out what it is here.
+            self.port = netProc.getPort( self.socket )
+            self.ip = self.getIp( self.socket )
+            logging.debug(f"{self.name} socket up on: {self.ip}:{self.port}")
+        except:
+            logging.error( traceback.format_exc() )
+            exit(-1)
+        
+        # OS should manage this queue, so its non-blocking
+        self.socket.listen( 5 )
+        # don't do anything in an interactive function if this is a test
+        if self.test:
+            return
+        # Sets up subProc if true
+        if self.subProc:
+            # mfd, sfd are file descriptprs created from pty.openpty() in which case they shuold be ints.
+            self.masterFd, self.servantFd = pty.openpty()
+            command = [ "python3", "setupNode.py", self.ip, str( self.port ) ]
+            self.proc = subprocess.Popen(
+                command, stdin=self.masterFd, stdout = subprocess.PIPE, 
+                stderr = subprocess.PIPE, text = True )
+
+        else:
+            self.runLoop()
+    # ======= BELOW ARE SUB PROC FUNCTIONS ===========
+    def sendCommand( self, command : str ):
+        ''' Sends a command through the redirected stdin'''
+        if self.proc == None:
+            raise ValueError("ERR: Trying to sendCommand to subprocess when none exists!")
+        # send command
+        os.write( self.masterFd, (command+"\n").encode() )
+    
+    def readProc( self ):
+        ''' Read output from subprocess '''
+        if self.proc == None:
+            raise ValueError("ERR: Trying to readProc from subprocess when none exists!")
+        return self.proc.stdout.readline() # type: ignore
+        
+    def getAttr( self, attrName ):
+        try:
+            return getattr(self, attrName )
+        except AttributeError:
+            logging.error(f"Attribute '{attrName}' not found in the object.")
+
+        
 class messageHandler():
     # TODO: write functions
     #  1. message cats:
@@ -374,6 +427,7 @@ class messageHandler():
 # and the user only interacts with the client portion?
 class shell(cmd.Cmd):
     intro = "Type help to get started\n"
+   
     prompt = "shell>"
     def __init__(self, peer : peer, spin : bool = True ):
         super().__init__()
@@ -383,9 +437,14 @@ class shell(cmd.Cmd):
     def default( self, line ):
         '''Default behavior when command is not recongized'''
         print(f"ERR: {line} is an unrecongized command or an incomplete argument")
+    
+    def do_name( self, _ ):
+        ''' prints the name of our peer'''
+        print( self.peer.name )
         
     def do_quit( self, _ ):
         '''exits the shell & terminates client'''
+        self.peer.up = False
         return True
     
     def do_listSockets(self, _ ):
@@ -397,7 +456,7 @@ class shell(cmd.Cmd):
         try:
             args = line.split()
             ipAddr = args[0]
-            port = args[1]
+            port = int( args[1] )
         except:
             self.default(line)
             return
@@ -406,6 +465,7 @@ class shell(cmd.Cmd):
     
     def do_sendMsg(self, line : str ):
         ''' <socketnickname: int> <msg: str>'''
+        print(f" sendMsg triggered: {line}")
         try:
             args = line.split()
             sockNick = int(args[0])
@@ -414,11 +474,20 @@ class shell(cmd.Cmd):
             self.default( line )
             return
         
-        if not self.peer.nicknameExists( sockNick ):
-            print( f" ERR: Nickname {sockNick} is not an existing socket!")
-        # Sends msg to local server to forward this message to the corresponding socket
-        self.peer.sendMsg( sockNick, messageHandler.encode_message(Command.SEND_MSG, msg) )
-    
+        if self.peer.nicknameExists( sockNick ):
+            if not self.peer.sendMsg( sockNick, messageHandler.encode_message(Command.RECV_MSG, msg) ):
+                print("ERR: Sending message to {sockNick} failed ")
+        else:
+            print( f" ERR: Nickname {sockNick} is not an existing socket!")  
+                  
+    def do_getAttr( self, line ):
+        try:
+            args = line.split()
+            name = args[0]
+            print( self.peer.getAttr( name ) )
+        except:
+            self.default(line)
+
     def spinAnimation(self):
         if self.spin == False:
             return
@@ -437,8 +506,8 @@ class shell(cmd.Cmd):
             # send msg to our local server
             print("Exiting...")
         return stop
-
-     
+            
+        
 # script guard, things in this script don't run automatically when imported
 if __name__ == "__main__":
     pass
