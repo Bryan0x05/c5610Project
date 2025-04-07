@@ -1,4 +1,4 @@
-name: Run pyright
+name: Main workflow
 on:
   push:
     branches:
@@ -7,7 +7,7 @@ on:
     branches:
       - main  # Runs on PRs targeting main branch
 jobs:
-  type-check:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: checkout  repository
@@ -26,3 +26,7 @@ jobs:
         uses: jakebailey/pyright-action@v2.3.2
         with:
            warnings: true
+
+      - name: Run tests
+        uses: |
+           python -m unittest unitTests.py

@@ -42,7 +42,6 @@ class TestCases( unittest.TestCase ):
 
         self.peer1.closeConn( 1 )
         self.assertTrue( len(self.peer1.connections) == len(self.peer1.nicknames) == 0 , "Dictionaries didn't de-populate" )
-    
-    
+
 if __name__ == '__main__':
     unittest.main()
