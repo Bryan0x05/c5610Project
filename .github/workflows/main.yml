@@ -28,5 +28,5 @@ jobs:
            warnings: true
 
       - name: Run tests
-        uses: |
+        run: |
            python -m unittest unitTests.py
