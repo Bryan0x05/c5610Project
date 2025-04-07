@@ -12,7 +12,7 @@ class TestCases( unittest.TestCase ):
     def setUpClass( cls ):
         ''' Runs once per class, setting up the test bed'''
         cls.peer1 = netlib.peer( name = "peer1", test = True, debug=True )
-        cls.peer2 = netlib.peer( name = "peer2", subProc = True, debug=True )
+        cls.peer2 = netlib.peer( name = "peer2", test = True, debug=True )
         cls.peer1.start()
         cls.peer2.start()
 
@@ -24,19 +24,12 @@ class TestCases( unittest.TestCase ):
 
     def test_connection( self ):
         '''Testing Connection setup and deconstruction'''
+        # NOTE: Weirdness isloated to the unitTest. Peer2 should not be able to accept a connection, it never calls
+        # acceptConn because of the test = true flag in its constructor yet here, it does.
         self.peer1.connectToIp( self.peer2.ip, self.peer2.port )
         time.sleep(2)
         self.assertTrue( self.peer1.nicknames[1] == ( self.peer2.ip, self.peer2.port), "Nickname dict didn't populate correctly" )
-
-        # NOTE: peer2.sendCommand sends a command to a third peer object that's running a subprocess
-        # as a result it doesn't have access to the same information as peer2. So:
-        # TODO: Shared memory structure to sync the 2 peer objects? Or a simplier scheme
-
-        # sendMsg = "Hello Peer 1"
-        # self.peer2.sendCommand( f"sendMsg 1 {sendMsg}" )
-        # rcvMsg = self.peer1.checkForMsgs()
-        # self.assertTrue( sendMsg == rcvMsg, f"sendMsg != {rcvMsg}" )
-
+        # NOTE: Testing sendMsg, behaves very odd in unitTest only. The caught expections cause it to exit for some reason.
         self.peer1.closeConn( 1 )
         self.assertTrue( len(self.peer1.connections) == len(self.peer1.nicknames) == 0 , "Dictionaries didn't de-populate" )
 

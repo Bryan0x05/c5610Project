@@ -59,7 +59,6 @@ class netProc:
         self.nicknames: typing.Dict[ int, tuple[ str, int ] ] = {}
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
-        self.socket.setblocking(False)
         self.socket.settimeout(2)
         self.stop = False
         self.proc = None
@@ -83,7 +82,6 @@ class netProc:
             self.nicknames[ self.conID ] = ( addrAndPort )
             self.conID += 1
             self.connections[ ( addrAndPort ) ] = conSock
-            conSock.setblocking(False)
             conSock.settimeout(2)
             # S = sending a heartbeat, R = requesting a heartbeat
             conSock.sendall( messageHandler.encode_message(Command.HEARTBEAT, "S", *addrAndPort)  )
@@ -167,11 +165,9 @@ class netProc:
         try:
             while len( incMsg := sock.recv(1024) ) > 0:
                     msg += incMsg
-        except TimeoutError: # Treating timeout as an async try again error
-                # As a result, this will spam stdout.
-                # logging.warning( traceback.format_exc() )
-                pass
-        except ConnectionResetError:
+        except ( socket.timeout, BlockingIOError ): # Treating timeout as an async try again error
+            pass
+        except OSError:
             logging.warning( traceback.format_exc() )
         except Exception:
             logging.error( traceback.format_exc() )
@@ -211,7 +207,7 @@ class netProc:
         exit(0)
 
 class peer(netProc):
-    def __init__(self, port: int = 0, name: str = "_", subProc = False, debug = False, test = False):
+    def __init__(self, port: int = 0, name: str = "_", subProc = False, debug = False, test = False ):
         super().__init__( port )
         self.name = name
         self.port = port
@@ -222,6 +218,7 @@ class peer(netProc):
     
     def checkForMsgs( self ):
         ''' Check for a message from all our sockets, returning the first one found'''
+        # unitTests seem to getting stuck in the floor when self.connections is empty
         for _, sock in self.connections.items():
             msg = netProc.readMsg( sock )
             if msg is not None:
@@ -255,11 +252,11 @@ class peer(netProc):
         # see if there are any new connections
         self.acceptConn()
         # see if there are any new messages on existing connections
+
         msg = self.checkForMsgs()
         
         if msg is not None:
             logging.debug(f"Server read msg: {msg}")
-            print(f"Server read msg: {msg}")
             # TODO: Finish this logic
             match( msg[COM] ):
                 case Command.KILL_SERVER:
@@ -273,9 +270,9 @@ class peer(netProc):
                     self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
         
                 case Command.RECV_MSG:
-                    msg = msg[ARGS]
-                    print( msg )
-                    self.lastRecv = msg
+                    
+                    msgRecv = msg[ARGS][1:]
+                    print(f"From: {msg[ARGS][0]}, msg: {msgRecv}" )
                     
                 case Command.HEARTBEAT:
                     # Someone is asking us to send a heartbeat
@@ -357,6 +354,7 @@ class peer(netProc):
         # don't do anything in an interactive function if this is a test
         if self.test:
             return
+        
         # Sets up subProc if true
         if self.subProc == True:
             # mfd, sfd are file descriptprs created from pty.openpty() in which case they shuold be ints.
@@ -389,18 +387,7 @@ class peer(netProc):
 
         
 class messageHandler():
-    # TODO: write functions
-    #  1. message cats:
-    #     1.1. Commands for the server to do
-    #     1.2. Msgs for the server to pass on
-    # commands / msgs:
-    #  1. Get nickname dictionary form server
-    #  2. sendmsg
-    #  3. knock
-    #  4. heartbeat
-    #  5. recvmsg
-    #  6. shutdown server
-    #  7. Shutdown whole network command (DEV)
+
     def __init__(self):
         pass
     
@@ -477,13 +464,15 @@ class shell(cmd.Cmd):
         try:
             args = line.split()
             sockNick = int(args[0])
+            msgSrc = self.peer.ip
+    
             msg = " ".join(args[1:])
         except:
             self.default( line )
             return
         
         if self.peer.nicknameExists( sockNick ):
-            if not self.peer.sendMsg( sockNick, messageHandler.encode_message(Command.RECV_MSG, msg) ):
+            if not self.peer.sendMsg( sockNick, messageHandler.encode_message(Command.RECV_MSG, msgSrc, msg) ):
                 print("ERR: Sending message to {sockNick} failed ")
         else:
             print( f" ERR: Nickname {sockNick} is not an existing socket!")  
