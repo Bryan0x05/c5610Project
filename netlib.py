@@ -97,6 +97,15 @@ class netProc:
         except Exception:
             # logging.error( traceback.format_exc() )
             return False
+    
+    def closeConn( self, nickname : int ):
+        sock : socket.socket = self.getSockByNickname( nickname )
+        # TODO: Replace this with a message / command to let the other server know to also clean
+        # up the connection their end and update their dictionary.
+        sock.shutdown(socket.SHUT_RDWR)
+        sock.close()
+        self.connections.pop( self.nicknames[nickname] )
+        self.nicknames.pop( nickname )
         
     def connectToHost( self, hostName: str, port: int ) -> bool:
        ''' Connects by host name e.g. www.google.com '''
@@ -192,8 +201,7 @@ class netProc:
         else:
             logging.error(f"Cannot send a message to {nickname} - not found in connection dict!")
             return False
-            
-
+    
     def shutDown( self ):
         ''' graceful shutdown '''
         for key, sock in self.connections.items():
@@ -349,7 +357,7 @@ class peer(netProc):
         if self.test:
             return
         # Sets up subProc if true
-        if self.subProc:
+        if self.subProc == True:
             # mfd, sfd are file descriptprs created from pty.openpty() in which case they shuold be ints.
             self.masterFd, self.servantFd = pty.openpty()
             command = [ "python3", "setupNode.py", self.ip, str( self.port ) ]
