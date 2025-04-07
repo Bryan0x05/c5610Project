@@ -28,9 +28,6 @@ class TestCases( unittest.TestCase ):
         time.sleep(2)
         self.assertTrue( self.peer1.nicknames[1] == ( self.peer2.ip, self.peer2.port), "Nickname dict didn't populate correctly" )
 
-        ip, port = self.peer1.nicknames[1]
-        self.assertTrue( ip == self.peer2.ip and port == self.peer2.port, "Socket information doesn't match peer2")
-
         # NOTE: peer2.sendCommand sends a command to a third peer object that's running a subprocess
         # as a result it doesn't have access to the same information as peer2. So:
         # TODO: Shared memory structure to sync the 2 peer objects? Or a simplier scheme

@@ -211,10 +211,11 @@ class netProc:
         exit(0)
 
 class peer(netProc):
-    def __init__(self, port: int = 0, name: str = "_", subProc = False, debug = False, test = True):
+    def __init__(self, port: int = 0, name: str = "_", subProc = False, debug = False, test = False):
         super().__init__( port )
         self.name = name
         self.port = port
+        self.ip = "No config"
         self.subProc = subProc
         self.test = test
         ( logging.getLogger() ).disabled = not debug
@@ -364,7 +365,6 @@ class peer(netProc):
             self.proc = subprocess.Popen(
                 command, stdin=self.masterFd, stdout = subprocess.PIPE, 
                 stderr = subprocess.PIPE, text = True )
-
         else:
             self.runLoop()
     # ======= BELOW ARE SUB PROC FUNCTIONS ===========
@@ -487,7 +487,11 @@ class shell(cmd.Cmd):
                 print("ERR: Sending message to {sockNick} failed ")
         else:
             print( f" ERR: Nickname {sockNick} is not an existing socket!")  
-                  
+    
+    def do_myInfo( self, _ ):
+        ''' myInfo <none>, prints ip:port of our peer'''
+        print(f"{self.peer.ip}:{self.peer.port}")
+    
     def do_getAttr( self, line ):
         try:
             args = line.split()
