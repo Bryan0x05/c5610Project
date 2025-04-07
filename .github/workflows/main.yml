@@ -1,11 +1,9 @@
 name: Main workflow
 on:
   push:
-    branches:
-      - main  # Runs on push to main branch
+
   pull_request:
-    branches:
-      - main  # Runs on PRs targeting main branch
+
 jobs:
   test:
     runs-on: ubuntu-latest
