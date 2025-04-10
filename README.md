@@ -7,8 +7,8 @@
 ## How to run
 * 'bash tmuxSetup.sh' - Split terminal with a peer object + cmd shell per pane.
 * 'help' to list availabe shell commands
-* 'help <cmd>' to print command documentation
-* '<cmd> <args>' to run a given command 
+* 'help cmd' to print command documentation
+* 'cmd arg1 arg2...' to run a given command 
 
 ## Using TMUX
 Relevant hotkeys:
