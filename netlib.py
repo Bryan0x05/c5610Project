@@ -1,5 +1,4 @@
 from imaplib import Commands
-import multiprocessing.connection
 import socket
 import typing
 import traceback
@@ -7,7 +6,6 @@ import logging
 import cmd
 import pprint
 from typing import Union
-import re
 import threading
 from enum import Enum
 import time
@@ -15,7 +13,7 @@ import os
 import subprocess
 import pty
 import multiprocessing
-# import colorama # for different colored text to help tell apart certain messages
+import colorama
 # import curses # linux based module for terminal formatting
 
 # argument seperator
@@ -59,7 +57,7 @@ class netProc:
         self.nicknames: typing.Dict[ int, tuple[ str, int ] ] = {}
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
-        self.socket.settimeout(2)
+        self.socket.setblocking(False)
         self.stop = False
         self.proc = None
     
@@ -82,7 +80,7 @@ class netProc:
             self.nicknames[ self.conID ] = ( addrAndPort )
             self.conID += 1
             self.connections[ ( addrAndPort ) ] = conSock
-            conSock.settimeout(2)
+            conSock.setblocking(False)
             # S = sending a heartbeat, R = requesting a heartbeat
             conSock.sendall( messageHandler.encode_message(Command.HEARTBEAT, "S", *addrAndPort)  )
             return True
@@ -162,7 +160,7 @@ class netProc:
         ''' Read a socket message '''
         msg : bytes = bytes()
         incMsg : bytes = bytes()
-        try:
+        try: # TODO: Process and only read up to header size instead of reading forever until we timeout
             while len( incMsg := sock.recv(1024) ) > 0:
                     msg += incMsg
         except ( socket.timeout, BlockingIOError ): # Treating timeout as an async try again error
@@ -211,7 +209,7 @@ class peer(netProc):
         super().__init__( port )
         self.name = name
         self.port = port
-        self.ip = "No config"
+        self.ip = "No ip"
         self.subProc = subProc
         self.test = test
         ( logging.getLogger() ).disabled = not debug
@@ -250,13 +248,13 @@ class peer(netProc):
         
         # see if there are any new connections
         self.acceptConn()
+        
         # see if there are any new messages on existing connections
-
-        msg = self.checkForMsgs()
+        msg: tuple[Command, list[str]] | None = self.checkForMsgs()
         
         if msg is not None:
             logging.debug(f"Server read msg: {msg}")
-            # TODO: Finish this logic
+            # TODO: Backport to python 3.8.1 e.g. no match.
             match( msg[COM] ):
                 case Command.KILL_SERVER:
                     self.kill_peer()
@@ -269,9 +267,8 @@ class peer(netProc):
                     self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
         
                 case Command.RECV_MSG:
-                    
                     msgRecv = msg[ARGS][1:]
-                    print(f"From: {msg[ARGS][0]}, msg: {msgRecv}" )
+                    print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
                     
                 case Command.HEARTBEAT:
                     # Someone is asking us to send a heartbeat
@@ -300,7 +297,7 @@ class peer(netProc):
                                 if self.connectToIp( ip, self.port ):
                                     print(f"Connection made to: {ip}:{self.port}")
                                 else:
-                                    print(f"ERR: Failed to connect to: {ip}:{self.port}")
+                                    print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
 
                 case default:
                     logging.debug("Server default case reached:")
@@ -324,12 +321,12 @@ class peer(netProc):
         return self.sendMsg(nickname, messageHandler.encode_message(Command.HEARTBEAT, "S", self.ip, self.port) )
          
     def knock(self, ip_addr, port) -> bool:
-        print(f"knock args: {ip_addr}:{port}")
+        #TODO: Replace placeholder logic with actual logic
         if self.connectToIp( ip_addr, port ):
-            print( f"Connected to: {ip_addr}:{port}" )
+            print(colorama.Fore.GREEN, f"Connected to {ip_addr}:{port}" + colorama.Style.RESET_ALL )
             return True
         else:
-            print( f"ERR: Failed to connect to {ip_addr}:{port}" )
+            print( colorama.Fore.RED, f"ERR: Failed to connect to {ip_addr}:{port}" + colorama.Style.RESET_ALL )
             return False
 
     def start( self ) :
@@ -364,6 +361,7 @@ class peer(netProc):
                 stderr = subprocess.PIPE, text = True )
         else:
             self.runLoop()
+
     # ======= BELOW ARE SUB PROC FUNCTIONS ===========
     def sendCommand( self, command : str ):
         ''' Sends a command through the redirected stdin'''
@@ -383,7 +381,6 @@ class peer(netProc):
             return getattr(self, attrName )
         except AttributeError:
             logging.error(f"Attribute '{attrName}' not found in the object.")
-
         
 class messageHandler():
 
@@ -426,7 +423,7 @@ class shell(cmd.Cmd):
     
     def default( self, line ):
         '''Default behavior when command is not recongized'''
-        print(f"ERR: {line} is an unrecongized command or an incomplete argument")
+        print( colorama.Fore.RED, f"ERR: {line} is an unrecongized command or an incomplete argument" + colorama.Style.RESET_ALL)
     
     def do_name( self, _ ):
         ''' prints the name of our peer'''
@@ -465,12 +462,15 @@ class shell(cmd.Cmd):
         except:
             self.default( line )
             return
-        print(f" Sending msg: {line}")
         if self.peer.nicknameExists( sockNick ):
             if not self.peer.sendMsg( sockNick, messageHandler.encode_message(Command.RECV_MSG, msgSrc, msg) ):
-                print("ERR: Sending message to {sockNick} failed ")
+                print(colorama.Fore.RED, f"ERR: Sending message to {sockNick} failed!" + colorama.Style.RESET_ALL)
+            else:
+                print(colorama.Fore.GREEN, "Message sent!" + colorama.Style.RESET_ALL)
         else:
-            print( f" ERR: Nickname {sockNick} is not an existing socket!")  
+            print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )  
+                
+
     
     def do_myInfo( self, _ ):
         ''' myInfo <none>, prints ip:port of our peer'''

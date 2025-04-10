@@ -1,3 +1,2 @@
-colorama==0.4.6
-keyboard==0.13.5
-libtmux==0.46.1
+colorama==0.4.3
+cryptography==2.8

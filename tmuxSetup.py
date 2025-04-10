@@ -1,3 +1,6 @@
+'''Setups a split terminal with 2 peer instances running'''
+# NOTE: For Python <= 3.8.x, see tmuxSetup.sh instead
+# TODO(maybe): backport to libtmux (0.38.1)
 import libtmux
 import time
 
