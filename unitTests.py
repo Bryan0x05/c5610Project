@@ -1,7 +1,6 @@
 import unittest
 import netlib
 import time
-import sys
 
 SETNODE = ("python3", "nodeSetup.py")
 # NOTE: setUp() func will run for every single test
@@ -33,5 +32,16 @@ class TestCases( unittest.TestCase ):
         self.peer1.closeConn( 1 )
         self.assertTrue( len(self.peer1.connections) == len(self.peer1.nicknames) == 0 , "Dictionaries didn't de-populate" )
 
+def basicNetworkingSuite():
+    suite = unittest.TestSuite()
+    suite.addTest( TestCases("test_connection") )
+    return suite
+
+def encryptionSuite():
+    suite = unittest.TestSuite()
+    # TODO: Add the tests
+    return suite
+
 if __name__ == '__main__':
-    unittest.main()
+    runner = unittest.TextTestRunner()
+    runner.run( basicNetworkingSuite() )

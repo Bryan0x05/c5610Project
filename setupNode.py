@@ -8,9 +8,7 @@ if __name__ == '__main__':
     subProc = False if(  len(sys.argv) > 1 and sys.argv[1] == "F") else True
     peer = netlib.peer( name = name, subProc=subProc)
     if subProc: 
-        print("subproc true")
         peer.runLoop()
     else: 
-        print("subproc false")
         peer.start()
-    print(f"Peer {name} closed")
+    print(f"Peer {name} is now closed")

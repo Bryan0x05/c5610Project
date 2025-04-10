@@ -15,7 +15,6 @@ if __name__ == '__main__':
     peer1 = netlib.peer( port = 61444, name="peer1", debug=True, subProc = False )
     peer2 = netlib.peer( port = 61454, name="peer2", debug=True, subProc = True)
     
-    
     peer2.start()
     print(f"peer 2 information: {peer2.ip}:{peer2.port}")
     

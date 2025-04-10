@@ -1,5 +1,4 @@
 import libtmux
-import libtmux.constants
 import time
 
 server = libtmux.Server()
@@ -19,8 +18,10 @@ pane1 = window.split(attach=False)
 for pane in window.panes:
     pane.send_keys("python3 setupNode.py F")
 
+# Attachs the terminal to the session
 server.attach_session( sessionName )
 
+# Cleans up when the user detatches ( hotkey: c^b + d )
 while True:
     time.sleep(1)
     isAttached = any( s.name == sessionName for s in server.attached_sessions )

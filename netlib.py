@@ -227,7 +227,6 @@ class peer(netProc):
 
     def runLoop( self ):
         ''' Do all the client things '''
-            
         # interactive console thread
         sh = shell(peer=self)
         self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
@@ -416,10 +415,6 @@ class messageHandler():
         args = m[1:].split(ASEP)
         return comm, args
 
-# This might be a 3rd process, or its part of the client process. If that's the case
-# maybe all socket communcation should be done through the server process, so we ensure nothing
-# on the client is blocking? I think the server part maybe should handle itself
-# and the user only interacts with the client portion?
 class shell(cmd.Cmd):
     intro = "Type help to get started\n"
    
@@ -460,7 +455,7 @@ class shell(cmd.Cmd):
     
     def do_sendMsg(self, line : str ):
         ''' <socketnickname: int> <msg: str>'''
-        print(f" sendMsg triggered: {line}")
+
         try:
             args = line.split()
             sockNick = int(args[0])
@@ -470,7 +465,7 @@ class shell(cmd.Cmd):
         except:
             self.default( line )
             return
-        
+        print(f" Sending msg: {line}")
         if self.peer.nicknameExists( sockNick ):
             if not self.peer.sendMsg( sockNick, messageHandler.encode_message(Command.RECV_MSG, msgSrc, msg) ):
                 print("ERR: Sending message to {sockNick} failed ")
@@ -507,7 +502,6 @@ class shell(cmd.Cmd):
             # send msg to our local server
             print("Exiting...")
         return stop
-            
         
 # script guard, things in this script don't run automatically when imported
 if __name__ == "__main__":
