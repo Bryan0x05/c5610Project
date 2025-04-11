@@ -1,6 +1,5 @@
 .#!/bin/bash
 # Script create a split terminal and start up peer objects
-
 echo "Starting the script"
 
 TMUX_SESSION_NAME='BTJ_NetSec'

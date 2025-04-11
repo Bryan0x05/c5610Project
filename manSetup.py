@@ -1,9 +1,5 @@
 ''' One subprocess node, one direct to our terminal both under manual control'''
 import netlib
-import multiprocessing
-import time
-import subprocess
-import os
 import pty
 # multi-process, at least when in spawn mode( since Windows doesn't have forking ),
 # requires a script guard, since spawn reimports modules
