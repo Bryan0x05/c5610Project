@@ -5,7 +5,7 @@ import traceback
 import logging
 import cmd
 import pprint
-from typing import Union
+from typing import Union, Tuple, List
 import threading
 from enum import Enum
 import time
@@ -197,7 +197,7 @@ class netProc:
         return conns
     
     @staticmethod
-    def readMsg( sock : socket.socket ) -> Union[ tuple[ Command, list[ str ] ], None ]:
+    def readMsg( sock : socket.socket ) -> Union[Tuple[Command, List[str]], None]:
         ''' Read a socket message '''
         msg : bytes = bytes()
         incMsg : bytes = bytes()
@@ -290,65 +290,56 @@ class peer(netProc):
         # see if there are any new connections
         self.acceptConn()
         # see if there are any new messages on existing connections
-        msg: tuple[Command, list[str]] | None = self.checkForMsgs()
+        msg: Union[Tuple[Command, List[str]], None] = self.checkForMsgs()
         
         if msg is not None:
             logging.debug(f"Server read msg: {msg}")
-            # TODO: Backport to python 3.8.1 e.g. no match.
-            match( msg[COM] ):
-                case Command.KILL_SERVER:
-                    self.kill_peer()
+            if msg[COM] == Command.KILL_SERVER:
+                self.kill_peer()
+            elif msg[COM] == Command.KILL_NETWORK:
+                self.kill_network()
+            elif msg[COM] == Command.SEND_MSG:
+                nick = int( msg[ARGS][0] )
                 
-                case Command.KILL_NETWORK:
-                    self.kill_network()
-
-                case Command.SEND_MSG:
-                    nick = int( msg[ARGS][0] )
-                    
-                    self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
-        
-                case Command.RECV_MSG:
-                    msgRecv = msg[ARGS][1:]
-                    print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
-                    
-                case Command.HEARTBEAT:
-                    # Someone is asking us to send a heartbeat
-                    if  msg[ARGS][0] == "R":
-                        self.heartbeat_request(int( msg[ARGS][0] ))
-                    else: # S, someone is telling us their heartbeat
-                        # print ipaddr, port
-                        print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
-                
-                case Command.KNOCK:
-                    # TODO: setup inbound connection
-                    # We are on step three of the handshake
-                    # 1. We each out to connect to peer B to make an outbound socket
-                    # 2. Peer B reaches contacts us on our listening socket
-                    # 3. We accept Peer B's incoming connection and update our inbound socket.
-                    # TODO: This could get messy and turn to a circular handshake if we aren't careful
-                    pass
-
-                case Command.GET_IPS:
-                    # requesting us to give the list
-                    if msg[ ARGS ][ 0 ] == "R":
-                        self.sendConnIps( int( msg[ ARGS ][ 1 ]) )
-                    # sending us a list
-                    if msg[ ARGS ][ 0 ] == "S":
-                        ips = msg[ ARGS ][ 1: ]
-                        # NOTE: Might want to chance this, but for now auto-connect to those ips
-                        keys = self.outboundConns.keys()
-                        ipAddrs = [ key[0] for key in keys ]
-                        for ip in ips:
-                            if  ip not in ipAddrs:
-                                # NOTE: Might want to use a different port? and/or retry on failure?
-                                if self.connectToIp( ip, self.port ):
-                                    print(f"Connection made to: {ip}:{self.port}")
-                                else:
-                                    print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
-
-                case default:
-                    logging.debug("Server default case reached:")
-                    pprint.pprint(msg)
+                self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
+            elif msg[COM] == Command.RECV_MSG:
+                msgRecv = msg[ARGS][1:]
+                print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
+            elif msg[COM] == Command.HEARTBEAT:
+                # Someone is asking us to send a heartbeat
+                if msg[ARGS][0] == "R":
+                    self.heartbeat_request(int( msg[ARGS][0] ))
+                else: # S, someone is telling us their heartbeat
+                    # print ipaddr, port
+                    print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
+            elif msg[COM] == Command.KNOCK:
+                # TODO: setup inbound connection
+                # We are on step three of the handshake
+                # 1. We each out to connect to peer B to make an outbound socket
+                # 2. Peer B reaches contacts us on our listening socket
+                # 3. We accept Peer B's incoming connection and update our inbound socket.
+                # TODO: This could get messy and turn to a circular handshake if we aren't careful
+                pass
+            elif msg[COM] == Command.GET_IPS:
+                # requesting us to give the list
+                if msg[ ARGS ][ 0 ] == "R":
+                    self.sendConnIps( int( msg[ ARGS ][ 1 ]) )
+                # sending us a list
+                if msg[ ARGS ][ 0 ] == "S":
+                    ips = msg[ ARGS ][ 1: ]
+                    # NOTE: Might want to chance this, but for now auto-connect to those ips
+                    keys = self.outboundConns.keys()
+                    ipAddrs = [ key[0] for key in keys ]
+                    for ip in ips:
+                        if  ip not in ipAddrs:
+                            # NOTE: Might want to use a different port? and/or retry on failure?
+                            if self.connectToIp( ip, self.port ):
+                                print(f"Connection made to: {ip}:{self.port}")
+                            else:
+                                print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
+            else:
+                logging.debug("Peer default case reached:")
+                pprint.pprint(msg)
         
     def kill_peer(self) -> bool:
         logging.debug("peer shutting down")
@@ -447,7 +438,7 @@ class messageHandler():
         return ( str ( len ( contents ) ) + ":" + contents ).encode()
     
     @staticmethod
-    def decode_message( message: bytes) -> tuple [Command, list ]:
+    def decode_message( message: bytes) -> Tuple[Command, list]:
         '''Turn the encoded format [length of command + data]:[command][data] into (command, data); Also checks the length'''
         m: str = message.decode()
         length: int = int(m.split(":", 1)[0])
