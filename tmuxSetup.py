@@ -24,7 +24,7 @@ for pane in window.panes:
 # Attachs the terminal to the session
 server.attach_session( sessionName )
 
-# Cleans up when the user detatches ( hotkey: c^b + d )
+# Cleans up when the user detachtes ( hotkey: c^b + d )
 while True:
     time.sleep(1)
     isAttached = any( s.name == sessionName for s in server.attached_sessions )

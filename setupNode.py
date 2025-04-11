@@ -5,7 +5,9 @@ import sys
 if __name__ == '__main__':
     name = sys.argv[0]
     subProc = False if(  len(sys.argv) > 1 and sys.argv[1] == "F") else True
-    peer = netlib.peer( name = name, subProc=subProc)
+    debug = False if(  len(sys.argv) > 2 and sys.argv[2] == "F") else True
+
+    peer = netlib.peer( name = name, subProc=subProc, debug=debug)
     if subProc: 
         peer.runLoop()
     else: 

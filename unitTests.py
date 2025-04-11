@@ -27,10 +27,10 @@ class TestCases( unittest.TestCase ):
         # acceptConn because of the test = true flag in its constructor yet here, it does.
         self.peer1.connectToIp( self.peer2.ip, self.peer2.port )
         time.sleep(2)
-        self.assertTrue( self.peer1.nicknames[1] == ( self.peer2.ip, self.peer2.port), "Nickname dict didn't populate correctly" )
+        self.assertTrue( self.peer1.outboundNicknames[1] == ( self.peer2.ip, self.peer2.port), "Nickname dict didn't populate correctly" )
         # NOTE: Testing sendMsg, behaves very odd in unitTest only. The caught expections cause it to exit for some reason.
         self.peer1.closeConn( 1 )
-        self.assertTrue( len(self.peer1.connections) == len(self.peer1.nicknames) == 0 , "Dictionaries didn't de-populate" )
+        self.assertTrue( len(self.peer1.outboundConns) == len(self.peer1.outboundNicknames) == 0 , "Dictionaries didn't de-populate" )
 
 def basicNetworkingSuite():
     suite = unittest.TestSuite()

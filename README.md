@@ -1,6 +1,7 @@
 # cs5610Project
 
 ## requirements
+* Linux ( Ubuntu )
 * Python >= 3.8.1
 * Tmux
 
@@ -9,6 +10,9 @@
 * 'help' to list availabe shell commands
 * 'help cmd' to print command documentation
 * 'cmd arg1 arg2...' to run a given command 
+* 'tab' to auto-complete a command
+*  up/down arrow to go through command history
+*  enter, to repeat last output to terminal and newline.
 
 ## Using TMUX
 Relevant hotkeys:

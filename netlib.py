@@ -12,7 +12,6 @@ import time
 import os
 import subprocess
 import pty
-import multiprocessing
 import colorama
 # import curses # linux based module for terminal formatting
 
@@ -20,14 +19,15 @@ import colorama
 ASEP = "|"
 
 class Command(Enum):
-    GET_DICT = 0     # Client -> Server: Get nickname dictionary from server
-    SEND_MSG = 1     # Client -> Server: Send a message to someone else in the network
-    RECV_MSG = 2     # Server -> Client: A message has arrived for the client - pass it on
-    KNOCK = 3        # Knock
-    HEARTBEAT = 4    # Heartbeat
-    KILL_SERVER = 5  # Client -> Server: Kill the server process
-    KILL_NETWORK = 6 # Client -> Server, Server -> Server: Kill the entire network by sending the message to all other nodes
-    GET_IPS = 7
+    GET_DICT = 0     # Node <-> Node: Get nickname dictionary from Node
+    SEND_MSG = 1     # Node <-> Node: Send a message to someone else in the network
+    RECV_MSG = 2     # Node <-> Node: A message has arrived for the client - pass it on
+    KNOCK = 3        # Node <-> Node: Connect to network, handshake
+    HEARTBEAT = 4    # Node <-> Node: Heartbeat, I'm alive!
+    KILL_SERVER = 5  # Node <-> Node: Kill the peer process
+    KILL_NETWORK = 6 # Node <-> Node: Kill the entire network by sending the message to all other nodes
+    GET_IPS = 7      # Node <-> Node: Give me all the ip addresses you are connected too.
+
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -49,12 +49,16 @@ class threadPlus ( threading.Thread ):
         
 class netProc:
     '''Super class for the common networking functions between client and server'''
+    IN = 0
+    OUT = 1
     def __init__( self, port: int):
         self.port = port
         # 0 means the client/server socket in our node
         self.conID = 1
-        self.connections: typing.Dict[ tuple [ str, int ], socket.socket] = {}
-        self.nicknames: typing.Dict[ int, tuple[ str, int ] ] = {}
+        self.outboundConns: typing.Dict[ tuple [ str, int ], socket.socket] = {}
+        self.inboundConns: typing.Dict[ tuple [ str, int ], socket.socket] = {}
+        # keyed by int, with a 2-tuple of 2tuples each holding str,int pair
+        self.nicknames: typing.Dict[ int, tuple[ tuple[str, int], tuple[str, int] ] ] = {}
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         self.socket.setblocking(False)
@@ -70,19 +74,55 @@ class netProc:
     def getIp( sock : socket.socket ) -> str:
         '''Gets a socket's ip address'''
         return sock.getsockname()[0]
-    
+    @staticmethod
+    def getLanIp() -> str:
+        try:
+            # sacrificial socket to find the lan ip without usual requirements
+            s = socket.socket( socket.AF_INET, socket.SOCK_DGRAM)
+            # connect to google DNS on HTTP port
+            s.connect( ("8.8.8.8", 80) )
+            # get the ip
+            ip = str( s.getsockname()[0] )
+            s.close()
+            return ip
+        except Exception:
+            logging.warning("Err, unable to resolve lan ip!")
+            logging.error( traceback.format_exc )
+            # return loopback intf for our local machine
+            # NOTE: This means we are unable to connect outside of our own machine
+            return "127.0.0.1" 
+            
     def acceptConn( self ) -> bool:
         ''' Accept a socket connection, warning this is blocking by default'''
-        # this is blocking! It'll wait until someone tries to talk to us!
+        # TODO: acceptConn may resolve a connect request from ip addr 0.0.0.0
+        # as 127.0.0.1. This is a valid interface, but is not the interface the 
+        # receiver is listening on.
+        ARGS = 1
+        msg = None
         try:
-            conSock, addrAndPort = self.socket.accept()
-            print(f"Connected accepted on {addrAndPort}, nickname: {self.conID}")
-            self.nicknames[ self.conID ] = ( addrAndPort )
+            # Despite accepting this connection the other peer actually doesn't know to listen to this port so its only 1-way.
+            inSock, addrAndPort = self.socket.accept()
+            logging.debug(f"Accept connection on {addrAndPort}, nickname: {self.conID}")
+            print(colorama.Fore.GREEN, "Accepted connection, handshake in progress..." + colorama.Style.RESET_ALL)
+            # TODO, add a timeout
+            while msg == None:
+                msg = netProc.readMsg( inSock )
+            # Get handshake information
+            replyId = int ( msg[ARGS][1] )
+            replyIp = str( addrAndPort[0] )
+            replyPort = int( msg[ARGS][2] )
+            
+            outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+            
+            # Make an out-bound connect to the port the other peer knows to listen to
+            outSock.connect( ( replyIp, replyPort ) )
+            # Inform that peer we are part of the handshake associated with replyID, R=> replying
+            outSock.sendall( messageHandler.encode_message( Command.KNOCK, 'R', replyId ) )
+            self.outboundConns[ ( replyIp, replyPort ) ] = outSock
+            self.inboundConns[ ( addrAndPort ) ]  = inSock
+            self.nicknames[ self.conID ] =  ( (addrAndPort), (replyIp, replyPort ) )
             self.conID += 1
-            self.connections[ ( addrAndPort ) ] = conSock
-            conSock.setblocking(False)
-            # S = sending a heartbeat, R = requesting a heartbeat
-            conSock.sendall( messageHandler.encode_message(Command.HEARTBEAT, "S", *addrAndPort)  )
+            inSock.setblocking(False)
             return True
         except BlockingIOError:
             # logging.error( traceback.format_exc() ) # uncomment this at your own sanity
@@ -100,7 +140,8 @@ class netProc:
         # up the connection their end and update their dictionary.
         sock.shutdown(socket.SHUT_RDWR)
         sock.close()
-        self.connections.pop( self.nicknames[nickname] )
+        self.inboundConns.pop( self.nicknames[nickname][self.IN])
+        self.outboundConns.pop( self.nicknames[nickname][self.OUT] )
         self.nicknames.pop( nickname )
         
     def connectToHost( self, hostName: str, port: int ) -> bool:
@@ -111,27 +152,27 @@ class netProc:
         ''' Connects by ipv4 address '''
         sock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         try:
-            if ( ipAddr, port ) in self.connections:
+            if ( ipAddr, port ) in self.outboundConns:
                 logging.debug(f"Already connected to {ipAddr}:{port}" )
             else:
                 sock.connect( (ipAddr, port) )
-                # only store on a success connection
-                self.connections[ ( ipAddr, port ) ] = sock
+                # -1 conId identifies the inbound socket of the positive connect id.
+                sock.sendall( messageHandler.encode_message(Command.KNOCK, self.conID, self.port ) )
+                self.outboundConns[ ( ipAddr, port ) ] = sock
                 self.nicknames[self.conID ] = ( ipAddr, port )
-                logging.debug(f" Connected to {ipAddr}:{port}, connection nickname: {self.conID} ")
                 self.conID += 1
+                logging.debug(f" Connected to {ipAddr}:{port}, connection nickname: {self.conID} ")
             return True
         # using Exception to exclude base exceptions like SystemExit or keyboardinterrupt
         except Exception:
             # prints last exception and traceback to stderr
             logging.error( traceback.format_exc() )
             return False
-
     
     def getSockByNickname( self, nickname: int ) -> socket.socket:
         ''' Returns the socket object associated with the nickname'''
         try:
-            return self.connections[ self.nicknames[ nickname ] ]
+            return self.outboundConns[ self.nicknames[ nickname ] ]
         except Exception:
             logging.error( traceback.format_exc() )
             # NOTE: We exit here, because certain code expects this function
@@ -178,7 +219,7 @@ class netProc:
         
     def sendConnIps( self, nickname: int ):
         ''' Send a list of all ip addrs we are connected to'''
-        peers: list[str] = [ ip for ( ip, _ ) in self.connections.keys() ]
+        peers: list[str] = [ ip for ( ip, _ ) in self.outboundConns.keys() ]
         # S = sending, as in sending the info, R = requesting, requesting the info
         self.sendMsg( nickname, messageHandler.encode_message(Command.GET_IPS, "S", *peers) )
 
@@ -198,7 +239,7 @@ class netProc:
     
     def shutDown( self ):
         ''' graceful shutdown '''
-        for key, sock in self.connections.items():
+        for key, sock in self.outboundConns.items():
             sock.shutdown(socket.SHUT_RDWR)
             sock.close()
         self.socket.close()
@@ -217,7 +258,7 @@ class peer(netProc):
     def checkForMsgs( self ):
         ''' Check for a message from all our sockets, returning the first one found'''
         # unitTests seem to getting stuck in the floor when self.connections is empty
-        for _, sock in self.connections.items():
+        for _, sock in self.inboundConns.items():
             msg = netProc.readMsg( sock )
             if msg is not None:
                 return msg
@@ -248,7 +289,6 @@ class peer(netProc):
         
         # see if there are any new connections
         self.acceptConn()
-        
         # see if there are any new messages on existing connections
         msg: tuple[Command, list[str]] | None = self.checkForMsgs()
         
@@ -264,6 +304,7 @@ class peer(netProc):
 
                 case Command.SEND_MSG:
                     nick = int( msg[ARGS][0] )
+                    
                     self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
         
                 case Command.RECV_MSG:
@@ -279,7 +320,13 @@ class peer(netProc):
                         print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
                 
                 case Command.KNOCK:
-                    self.knock(msg[ ARGS ][ 0 ], int( msg[ ARGS ][ 1 ] ))  
+                    # TODO: setup inbound connection
+                    # We are on step three of the handshake
+                    # 1. We each out to connect to peer B to make an outbound socket
+                    # 2. Peer B reaches contacts us on our listening socket
+                    # 3. We accept Peer B's incoming connection and update our inbound socket.
+                    # TODO: This could get messy and turn to a circular handshake if we aren't careful
+                    pass
 
                 case Command.GET_IPS:
                     # requesting us to give the list
@@ -289,7 +336,7 @@ class peer(netProc):
                     if msg[ ARGS ][ 0 ] == "S":
                         ips = msg[ ARGS ][ 1: ]
                         # NOTE: Might want to chance this, but for now auto-connect to those ips
-                        keys = self.connections.keys()
+                        keys = self.outboundConns.keys()
                         ipAddrs = [ key[0] for key in keys ]
                         for ip in ips:
                             if  ip not in ipAddrs:
@@ -311,7 +358,7 @@ class peer(netProc):
     
     def kill_network(self) -> bool:
         logging.debug("server killing network")
-        for nick, _ in self.nicknames.items():
+        for nick, _ in self.outboundNicknames.items():
             self.sendMsg( nick, messageHandler.encode_message( Command.KILL_NETWORK ) )
         # close all our sockets
         self.shutDown()
@@ -321,7 +368,6 @@ class peer(netProc):
         return self.sendMsg(nickname, messageHandler.encode_message(Command.HEARTBEAT, "S", self.ip, self.port) )
          
     def knock(self, ip_addr, port) -> bool:
-        #TODO: Replace placeholder logic with actual logic
         if self.connectToIp( ip_addr, port ):
             print(colorama.Fore.GREEN, f"Connected to {ip_addr}:{port}" + colorama.Style.RESET_ALL )
             return True
@@ -336,7 +382,7 @@ class peer(netProc):
             # Allow socket re-use to get around linux wait state
             # basically lets you spam run the script without changing the port numbers in Linux.
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind( ( '', self.port ) )
+            self.socket.bind( ( netProc.getLanIp() , self.port ) )
             # if port = 0, the OS picks one for us, and we find out what it is here.
             self.port = netProc.getPort( self.socket )
             self.ip = self.getIp( self.socket )
@@ -425,6 +471,10 @@ class shell(cmd.Cmd):
         '''Default behavior when command is not recongized'''
         print( colorama.Fore.RED, f"ERR: {line} is an unrecongized command or an incomplete argument" + colorama.Style.RESET_ALL)
     
+    def do_clear( self, _):
+        ''' Clear screen '''
+        os.system('cls' if os.name == 'nt' else 'clear')
+    
     def do_name( self, _ ):
         ''' prints the name of our peer'''
         print( self.peer.name )
@@ -436,7 +486,7 @@ class shell(cmd.Cmd):
     
     def do_listSockets(self, _ ):
         '''Return the list of sockets '''
-        pprint.pprint(self.peer.nicknames)
+        pprint.pprint(self.peer.outboundNicknames)
         
     def do_makeConn(self, line: str):
         ''' Connect to a given < ipAddr(x.x.x.x) > < port >'''
@@ -448,16 +498,14 @@ class shell(cmd.Cmd):
             self.default(line)
             return
         # Sends msg to local server to forward this message to the corresponding socket
-        self.peer.knock(ipAddr, port)
+        self.peer.knock( ipAddr, port)
     
     def do_sendMsg(self, line : str ):
         ''' <socketnickname: int> <msg: str>'''
-
         try:
             args = line.split()
             sockNick = int(args[0])
             msgSrc = self.peer.ip
-    
             msg = " ".join(args[1:])
         except:
             self.default( line )
@@ -470,7 +518,6 @@ class shell(cmd.Cmd):
         else:
             print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )  
                 
-
     
     def do_myInfo( self, _ ):
         ''' myInfo <none>, prints ip:port of our peer'''
