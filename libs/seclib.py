@@ -20,13 +20,13 @@ class securityManager():
         # Password-based key derivation function 2
         # kdf is the key derivation function
         # TODO: Actually look into if these are good values
-        kdf = PBKDF2HMAC(
+        kdf = PBKDF2HMAC(              # type: ignore
             algorithm=hashes.SHA256(), # hash func
             length=32,                 # byte length
             salt=salt,                 # salt (noise)
-            iterations=iters,          # rounds of hashing
+            iterations=iters,          # rounds of hashing 
         )
-        return kdf.derive( pwd.encode() )
+        return kdf.derive( pwd.encode() )# type: ignore
     
     @staticmethod
     def getUserPath( user):
