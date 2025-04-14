@@ -14,8 +14,8 @@ class securityManager():
         '''produces a password salt'''
         return os.urandom( length )
     
-    @staticmethod # NOTE: do not typecast to return bytes, pyright doesn't like it for whatever reasons
-    def encryptPwd( pwd: str, salt : bytes, iters: int = 1_000 ):
+    @staticmethod 
+    def encryptPwd( pwd: str, salt : bytes, iters: int = 1_000 ) ->bytes: # type: ignore
         ''' Encypt passsword, returns the hash in bytes '''
         # Password-based key derivation function 2
         # kdf is the key derivation function
