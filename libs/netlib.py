@@ -58,11 +58,11 @@ class netProc:
         self.port = port
         # 0 means the client/server socket in our node
         self.conID = 1
-        self.outboundConns: typing.Dict[ Tuple [ str, int ], socket.socket]
-        self.inboundConns: typing.Dict[ Tuple [ str, int ], socket.socket]
+        self.outboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = dict()
+        self.inboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = dict()
         # keyed by int, with a 2-tuple of 2tuples each holding str,int pair
-        self.nicknames: typing.Dict[ int, Tuple[ Tuple[str, int], Tuple[str, int] ] ]
-        self.uris: typing.Dict[ Tuple [ str, int ], nodeType ] #TODO implement
+        self.nicknames: typing.Dict[ int, Tuple[ Tuple[str, int], Tuple[str, int] ] ] = dict()
+        self.uris: typing.Dict[ Tuple [ str, int ], nodeType ] = dict() #TODO implement
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         self.socket.setblocking(False)
@@ -184,14 +184,19 @@ class netProc:
             return False
 
     def closeConn( self, nickname : int ):
-        sock : socket.socket = self.getSockByNickname( nickname )
+        outSock : socket.socket = self.getSockByNickname( nickname )
+        inSock = self.inboundConns[ self.nicknames[nickname][self.OUT] ]
+
+        # TODO: Send a message telling our peers we have closed our side.
+        outSock.close()
+        inSock.close()
         # TODO: Replace this with a message / command to let the other server know to also clean
         # up the connection their end and update their dictionary.
-        sock.shutdown(socket.SHUT_RDWR)
-        sock.close()
         self.inboundConns.pop( self.nicknames[nickname][self.IN])
         self.outboundConns.pop( self.nicknames[nickname][self.OUT] )
         self.nicknames.pop( nickname )
+        
+
         
     def connectToHost( self, hostName: str, port: int ) -> bool:
        ''' Connects by host name e.g. www.google.com '''
@@ -199,8 +204,8 @@ class netProc:
     
     def connectToIp( self, targetIpAddr: str, targetPort : int ) -> bool:
         ''' Connects by ipv4 address '''
-        outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         try:
+            outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
             if ( targetIpAddr, targetPort ) in self.outboundConns:
                 logging.debug(f"Already connected to {targetIpAddr}:{targetPort}" )
             else:
@@ -304,6 +309,7 @@ class peer(netProc):
         self.ip = "No ip"
         self.subProc = subProc
         self.test = test
+        self.debug = debug
         ( logging.getLogger() ).disabled = not debug
     
     def checkForMsgs( self ):
@@ -422,6 +428,17 @@ class peer(netProc):
     def start( self ) :
         ''' Bind the socket and start the peer '''
         self.up = True
+
+        if self.subProc == True:
+            # mfd, sfd are file descriptprs created from pty.openpty() in which case they shuold be ints.
+            self.masterFd, self.servantFd = pty.openpty()
+            debug = "F" if self.debug == False else "T"
+            command = [ "python3", "setupNode.py", "F", debug ]
+            self.proc = subprocess.Popen(
+                command, stdin=self.masterFd, stdout = subprocess.PIPE, 
+                stderr = subprocess.PIPE, text = True )
+            return
+        
         try:
             # Allow socket re-use to get around linux wait state
             # basically lets you spam run the script without changing the port numbers in Linux.
@@ -431,24 +448,15 @@ class peer(netProc):
             self.port = netProc.getPort( self.socket )
             self.ip = self.getIp( self.socket )
             logging.debug(f"{self.name} socket up on: {self.ip}:{self.port}")
+            # OS should manage this queue, so its non-blocking to us.
+            self.socket.listen( 5 )
         except:
             logging.error( traceback.format_exc() )
             exit(-1)
         
-        # OS should manage this queue, so its non-blocking to us.
-        self.socket.listen( 5 )
         # don't do anything in an interactive function if this flag is on
         if self.test:
             return
-        
-        # Sets up subProc if true
-        if self.subProc == True:
-            # mfd, sfd are file descriptprs created from pty.openpty() in which case they shuold be ints.
-            self.masterFd, self.servantFd = pty.openpty()
-            command = [ "python3", "setupNode.py", self.ip, str( self.port ) ]
-            self.proc = subprocess.Popen(
-                command, stdin=self.masterFd, # stdout = subprocess.PIPE, 
-                stderr = subprocess.PIPE, text = True )
         else:
             self.runLoop()
 
@@ -462,10 +470,9 @@ class peer(netProc):
     
     def readProc( self ):
         ''' Read output from subprocess '''
-        return # TODO: DEBUG: DO NOT LEAVE THIS HERE.
         if self.proc == None:
             raise ValueError("ERR: Trying to readProc from subprocess when none exists!")
-        return self.proc.stdout.readline() # type: ignore
+        return self.proc.stdout.read() # type: ignore
         
     def getAttr( self, attrName ):
         try:

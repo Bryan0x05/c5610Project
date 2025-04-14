@@ -1,8 +1,6 @@
 import unittest
-import libs.netlib as netlib
+from libs.netlib import peer, messageHandler, Command
 import time
-from typing import Union, Tuple, List
-import socket
 
 SETNODE = ("python3", "nodeSetup.py")
 # NOTE: setUp() func will run for every single test
@@ -12,8 +10,8 @@ class TestCases( unittest.TestCase ):
     @classmethod
     def setUpClass( cls ):
         ''' Runs once per class, setting up the test bed'''
-        cls.peer1 = netlib.peer( name = "peer1", test = True, debug=True )
-        cls.peer2 = netlib.peer( name = "peer2", debug=True, subProc=True )
+        cls.peer1 = peer( name = "peer1", test = True, debug=True )
+        cls.peer2 = peer( name = "peer2", test = True, debug=True )
         cls.peer1.start()
         cls.peer2.start()
 
@@ -25,23 +23,24 @@ class TestCases( unittest.TestCase ):
 
     def test_connection( self ):
         '''Testing Connection setup and deconstruction'''
-        ARG  = 1
-        # NOTE: Weirdness isloated to the unitTest. Peer2 should not be able to accept a connection, it never calls
-        # acceptConn because of the test = true flag in its constructor yet here, it does.
+        
         self.peer1.connectToIp( self.peer2.ip, self.peer2.port )
-        time.sleep(2)
-        self.peer2.readProc()
-        sendMsg = "hello peer 1"
-        self.peer2.sendCommand(f"sendMsg 1 {sendMsg}" )
-         
-        msg: Union[Tuple[Tuple[netlib.Command, List[str]], socket.socket], None] = None
-        while ( msg := self.peer1.checkForMsgs() ) == None:
-            pass
-        readMsg = ''.join(msg[0][ARG][0:])
-        self.assertTrue( msg == readMsg, f"ReadMsg != msg readMsg is: {readMsg}" )
-        # NOTE: Testing sendMsg, behaves very odd in unitTest only. The caught expections cause it to exit for some reason.
-        self.peer1.closeConn( 1 )
-        self.assertTrue( len(self.peer1.outboundConns) == len(self.peer1.nicknames) == 0 , "Dictionaries didn't de-populate" )
+        self.peer2.acceptConn()
+        peer1Msg = "hello peer 2"
+        self.peer1.sendMsg(1, messageHandler.encode_message(Command.SEND_MSG, peer1Msg) )
+        time.sleep(1)
+        readMsg = self.peer2.checkForMsgs()
+        self.assertFalse( readMsg == None, "read msg is none!")
+        if readMsg == None: return
+        readMsg = "".join(readMsg[0][1][0:])
+        self.assertTrue( readMsg == peer1Msg, f"message mismatch, read msg : expected> { readMsg} : {peer1Msg}")
+        # test 2-way comm
+        peer2Msg = "hello peer 1"
+        self.peer2.sendMsg(1, messageHandler.encode_message(Command.SEND_MSG, peer2Msg) )
+        readMsg = self.peer2.checkForMsgs()
+        if readMsg == None: return
+        readMsg = "".join(readMsg[0][1][0:])
+        self.assertTrue( readMsg == peer2Msg, f"message mismatch, read msg : expected> { readMsg} : {peer1Msg}")
 
 def basicNetworkingSuite():
     suite = unittest.TestSuite()
