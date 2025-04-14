@@ -27,5 +27,5 @@ jobs:
 
       - name: Run tests
         run: |
-           python -m unittest unitTests.py
+           python -m unittest *_test.py
            
