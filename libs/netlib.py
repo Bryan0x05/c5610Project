@@ -3,16 +3,15 @@ import socket
 import typing
 import traceback
 import logging
-import cmd
 import pprint
 from typing import Union, Tuple, List
 import threading
 from enum import Enum
-import time
 import os
 import subprocess
 import pty
 import colorama
+from libs.clilib import shell
 # import curses # linux based module for terminal formatting
 
 # argument seperator
@@ -28,6 +27,9 @@ class Command(Enum):
     KILL_NETWORK = 6 # Node <-> Node: Kill the entire network by sending the message to all other nodes
     GET_IPS = 7      # Node <-> Node: Give me all the ip addresses you are connected too.
 
+class nodeType(Enum):
+    PEER = 0
+    CA = 1
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -51,14 +53,16 @@ class netProc:
     '''Super class for the common networking functions between client and server'''
     IN = 0
     OUT = 1
+    ARGS = 1
     def __init__( self, port: int):
         self.port = port
         # 0 means the client/server socket in our node
         self.conID = 1
-        self.outboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = {}
-        self.inboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = {}
+        self.outboundConns: typing.Dict[ Tuple [ str, int ], socket.socket]
+        self.inboundConns: typing.Dict[ Tuple [ str, int ], socket.socket]
         # keyed by int, with a 2-tuple of 2tuples each holding str,int pair
-        self.nicknames: typing.Dict[ int, Tuple[ Tuple[str, int], Tuple[str, int] ] ] = {}
+        self.nicknames: typing.Dict[ int, Tuple[ Tuple[str, int], Tuple[str, int] ] ]
+        self.uris: typing.Dict[ Tuple [ str, int ], nodeType ] #TODO implement
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         self.socket.setblocking(False)
@@ -74,6 +78,7 @@ class netProc:
     def getIp( sock : socket.socket ) -> str:
         '''Gets a socket's ip address'''
         return sock.getsockname()[0]
+
     @staticmethod
     def getLanIp() -> str:
         try:
@@ -92,18 +97,19 @@ class netProc:
             # NOTE: This means we are unable to connect outside of our own machine
             return "127.0.0.1" 
         
-    def completeHandshake( self, inSock : socket.socket, conID : int, ip : str , port : int ) -> bool:
+    def completeHandshake( self, inSock : socket.socket, msg: Tuple[Command, List[str]] ) -> bool:
         ''''Accepts Step 3 of the handshake reply, terminates handshake'''
-        ARG = 1
         print("in complete handshake")
         try:
-            if not self.nicknameExists( conID ):
+            # the reply handshake should be to an existing already in-use conID
+            replyConId = int(msg[self.ARGS][1])
+            if not self.nicknameExists( replyConId ):
                 logging.error( traceback.format_exc() )
                 return False
             
-            self.outboundConns[ ip, port] = inSock
-            outSockInfo = self.nicknames[conID][self.IN]
-            self.nicknames[ conID ] = ( (outSockInfo), (ip, port) )
+            self.inboundConns[ inSock.getsockname() ] = inSock
+            outSockInfo = self.nicknames[ replyConId ][self.OUT]
+            self.nicknames[ replyConId ] = ( inSock.getsockname(), (outSockInfo) )
         except BlockingIOError:
             # logging.error( traceback.format_exc() ) # uncomment this at your own sanity
             return False
@@ -115,49 +121,33 @@ class netProc:
             return False
         return True
 
-            
     def acceptConn( self ) -> bool:
         ''' Accept a socket connection, warning this is blocking by default'''
-        ARGS = 1
-        msg = None
         try:
             # Despite accepting this connection the other peer actually doesn't know to listen to this port so its only 1-way.
-            inSock, addrAndPort = self.socket.accept()
-            inSock.settimeout(3)
-            logging.debug(f"Accept connection on {addrAndPort}, nickname: {self.conID}")
+            inSock, peerAddrAndPort = self.socket.accept()
+            logging.debug(f"Accept connection from: {peerAddrAndPort}, on socket: {inSock.getsockname()}")
             print(colorama.Fore.GREEN, "Accepted connection, handshake in progress..." + colorama.Style.RESET_ALL)
-            # TODO, add a timeout
-            msg = netProc.readMsg( inSock )
-            
-            self.inboundConns[ ( addrAndPort ) ]  = inSock
-            
+            inSock.setblocking( False)
+            msg = None
+            while msg == None:
+                msg = netProc.readMsg( inSock )
+                
             if msg is None:
-                logging.error( "bad things are happening")
+                logging.error( "AcceptConn: msg is none!")
                 return False
-            # step 3
-            if msg[ARGS][0] == 'R':
-                print("HEY, we got the R-flag Knock")
-                self.inboundConns[ addrAndPort ] = inSock
-                self.nicknames[ int(msg[ARGS][1]) ] = ( addrAndPort, tuple() ) 
-                return self.completeHandshake( inSock, int(msg[ARGS][1]), *(inSock.getpeername()) )
-            
-            # Get handshake information ( step 2)
-            replyIp = str( addrAndPort[0] )
-            replyId = int ( msg[ARGS][0] )
-            replyPort = int( msg[ARGS][1] )
-            
-            outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
-            outSock.setblocking(False)
-            # Make an out-bound connect to the port the other peer knows to listen to
-            outSock.connect( ( replyIp, replyPort ) )
-            print(colorama.Fore.GREEN, "Handshake in progress[step2 complete]..." + colorama.Style.RESET_ALL)
-
-            # Inform that peer we are part of the handshake associated with replyID, R=> replying
-            outSock.sendall( messageHandler.encode_message( Command.KNOCK, 'R', replyId ) )
-            self.outboundConns[ ( replyIp, replyPort ) ] = outSock
-            self.nicknames[ self.conID ] =  ( (addrAndPort), (replyIp, replyPort ) )
-            self.conID += 1
-            return True
+            elif msg[self.ARGS][0] != 'R' : # step 2 of handshake
+                print(f"acceptConn read: {msg}")
+                self.inboundConns[ inSock.getsockname() ]  = inSock
+                # partial dict update
+                self.nicknames[ self.conID ] = (  inSock.getsockname() ,tuple() )
+                # conID and several dicts are updated in here
+                return self.handshakeMid( peerAddrAndPort, msg )
+            elif msg[self.ARGS][0] == 'R': # step 3 of handshake ( creates duplex conn with 2 sockets )
+                return self.completeHandshake( inSock, msg )
+            else:
+                print("not a valid case in acceptConn")
+                return False
         except BlockingIOError:
             # logging.error( traceback.format_exc() ) # uncomment this at your own sanity
             return False
@@ -168,6 +158,31 @@ class netProc:
             logging.error( traceback.format_exc() )
             return False
     
+    def handshakeMid( self, peerAddrAndPort, msg):
+        ''' Deals with handshake step 2'''
+        try:
+            replyIp = str( peerAddrAndPort[0] )
+            replyId = int ( msg[self.ARGS][0] )
+            replyPort = int( msg[self.ARGS][1] )
+            # Reach other to peer's "server" socket to establish 2-way connection
+            outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+            outSock.settimeout(5)
+            outSock.connect( (replyIp, replyPort) )
+            outSock.sendall( messageHandler.encode_message( Command.KNOCK, 'R', replyId ) )
+            # I believe this unsets timeout
+            # This is fine, the rest of the code operates on a read-again error assumption
+            # that non-blocking sockets provide
+            outSock.setblocking(False)
+            ipAddr, port = outSock.getsockname()
+            self.outboundConns[ (ipAddr, port) ] = outSock
+            self.nicknames [ self.conID ] = ( self.nicknames[self.conID][self.IN], (ipAddr, port) )
+            self.conID += 1
+            print(colorama.Fore.GREEN, "Handshake in progress..step 2" + colorama.Style.RESET_ALL)
+            return True
+        except Exception:
+            logging.error( traceback.format_exc )
+            return False
+
     def closeConn( self, nickname : int ):
         sock : socket.socket = self.getSockByNickname( nickname )
         # TODO: Replace this with a message / command to let the other server know to also clean
@@ -182,17 +197,19 @@ class netProc:
        ''' Connects by host name e.g. www.google.com '''
        return self.connectToIp( socket.gethostbyname( hostName ), port )
     
-    def connectToIp( self, ipAddr: str, port : int ) -> bool:
+    def connectToIp( self, targetIpAddr: str, targetPort : int ) -> bool:
         ''' Connects by ipv4 address '''
-        sock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+        outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         try:
-            if ( ipAddr, port ) in self.outboundConns:
-                logging.debug(f"Already connected to {ipAddr}:{port}" )
+            if ( targetIpAddr, targetPort ) in self.outboundConns:
+                logging.debug(f"Already connected to {targetIpAddr}:{targetPort}" )
             else:
-                sock.connect( (ipAddr, port) )
+                outSock.connect( (targetIpAddr, targetPort) )
                 # step 1 of the handshake
-                sock.sendall( messageHandler.encode_message(Command.KNOCK, self.conID, self.port ) )
-                self.outboundConns[ ( ipAddr, port ) ] = sock
+                outSock.sendall( messageHandler.encode_message(Command.KNOCK, self.conID, self.port ) )
+                outSock.setblocking(False)
+                ipAddr, port = outSock.getsockname()
+                self.outboundConns[ (ipAddr, port) ] = outSock
                 self.nicknames[self.conID ] = ( tuple(), ( ipAddr, port ) )
                 self.conID += 1
                 logging.debug(f" Connected to {ipAddr}:{port}, connection nickname: {self.conID} ")
@@ -301,9 +318,8 @@ class peer(netProc):
     def runLoop( self ):
         ''' Do all the client things '''
         # interactive console thread
-        sh = shell(peer=self)
+        sh = shell( peer=self)
         self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
-
         # listen for msgs and replies
         self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread" )
 
@@ -328,7 +344,7 @@ class peer(netProc):
         
         if readMsg is not None:
             revSock = readMsg[1]
-            msg: Union[Tuple[Command, List[str]], None] = readMsg[0]
+            msg: Tuple[Command, List[str]] = readMsg[0]
             logging.debug(f"Server read msg: {msg}")
             if msg[COM] == Command.KILL_SERVER:
                 self.kill_peer()
@@ -336,7 +352,6 @@ class peer(netProc):
                 self.kill_network()
             elif msg[COM] == Command.SEND_MSG:
                 nick = int( msg[ARGS][0] )
-                
                 self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
             elif msg[COM] == Command.RECV_MSG:
                 msgRecv = msg[ARGS][1:]
@@ -344,19 +359,20 @@ class peer(netProc):
             elif msg[COM] == Command.HEARTBEAT:
                 # Someone is asking us to send a heartbeat
                 if msg[ARGS][0] == "R":
-                    self.heartbeat_request(int( msg[ARGS][0] ))
+                    self.heartbeat_request( int( msg[ARGS][0] ))
                 else: # S, someone is telling us their heartbeat
                     # print ipaddr, port
                     print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
             elif msg[COM] == Command.KNOCK:
+                '''
                 # step 3
                 if msg[ARGS][0] == 'R':
-                    print(colorama.Fore.GREEN, "Handshake in progress[step3.1]..." + colorama.Style.RESET_ALL)
-                    self.completeHandshake( revSock, int( msg[ARGS][1] ), *(revSock.getpeername()) )
+                    print(colorama.Fore.GREEN, "Handshake in progress[step3]..." + colorama.Style.RESET_ALL)
+                    self.completeHandshake( revSock, msg )
                     print(colorama.Fore.GREEN, "Handshake done!" + colorama.Style.RESET_ALL)
-
                 else: # step 2 is handled in accept conn, not here.
                     pass
+                '''
             elif msg[COM] == Command.GET_IPS:
                 # requesting us to give the list
                 if msg[ ARGS ][ 0 ] == "R":
@@ -419,9 +435,9 @@ class peer(netProc):
             logging.error( traceback.format_exc() )
             exit(-1)
         
-        # OS should manage this queue, so its non-blocking
+        # OS should manage this queue, so its non-blocking to us.
         self.socket.listen( 5 )
-        # don't do anything in an interactive function if this is a test
+        # don't do anything in an interactive function if this flag is on
         if self.test:
             return
         
@@ -446,7 +462,7 @@ class peer(netProc):
     
     def readProc( self ):
         ''' Read output from subprocess '''
-        return # DEBUG: DO NOT LEAVE THIS HERE.
+        return # TODO: DEBUG: DO NOT LEAVE THIS HERE.
         if self.proc == None:
             raise ValueError("ERR: Trying to readProc from subprocess when none exists!")
         return self.proc.stdout.readline() # type: ignore
@@ -456,7 +472,7 @@ class peer(netProc):
             return getattr(self, attrName )
         except AttributeError:
             logging.error(f"Attribute '{attrName}' not found in the object.")
-        
+            
 class messageHandler():
 
     def __init__(self):
@@ -487,96 +503,7 @@ class messageHandler():
         args = m[1:].split(ASEP)
         return comm, args
 
-class shell(cmd.Cmd):
-    intro = "Type help to get started\n"
-   
-    prompt = "shell>"
-    def __init__(self, peer : peer, spin : bool = True ):
-        super().__init__()
-        self.peer = peer
-        self.spin = spin
-    
-    def default( self, line ):
-        '''Default behavior when command is not recongized'''
-        print( colorama.Fore.RED, f"ERR: {line} is an unrecongized command or an incomplete argument" + colorama.Style.RESET_ALL)
-    
-    def do_clear( self, _):
-        ''' Clear screen '''
-        os.system('cls' if os.name == 'nt' else 'clear')
-    
-    def do_name( self, _ ):
-        ''' prints the name of our peer'''
-        print( self.peer.name )
-        
-    def do_quit( self, _ ):
-        '''exits the shell & terminates client'''
-        self.peer.up = False
-        return True
-    
-    def do_listSockets(self, _ ):
-        '''Return the list of sockets '''
-        pprint.pprint(self.peer.nicknames)
-        
-    def do_makeConn(self, line: str):
-        ''' Connect to a given < ipAddr(x.x.x.x) > < port >'''
-        try:
-            args = line.split()
-            ipAddr = args[0]
-            port = int( args[1] )
-        except:
-            self.default(line)
-            return
-        # Sends msg to local server to forward this message to the corresponding socket
-        self.peer.knock( ipAddr, port)
-    
-    def do_sendMsg(self, line : str ):
-        ''' <socketnickname: int> <msg: str>'''
-        try:
-            args = line.split()
-            sockNick = int(args[0])
-            msgSrc = self.peer.ip
-            msg = " ".join(args[1:])
-        except:
-            self.default( line )
-            return
-        if self.peer.nicknameExists( sockNick ):
-            if not self.peer.sendMsg( sockNick, messageHandler.encode_message(Command.RECV_MSG, msgSrc, msg) ):
-                print(colorama.Fore.RED, f"ERR: Sending message to {sockNick} failed!" + colorama.Style.RESET_ALL)
-            else:
-                print(colorama.Fore.GREEN, "Message sent!" + colorama.Style.RESET_ALL)
-        else:
-            print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )  
-                
-    def do_myInfo( self, _ ):
-        ''' myInfo <none>, prints ip:port of our peer'''
-        print(colorama.Fore.GREEN,f"{self.peer.ip}:{self.peer.port}" + colorama.Style.RESET_ALL)
-    
-    def do_getAttr( self, line ):
-        try:
-            args = line.split()
-            name = args[0]
-            print( self.peer.getAttr( name ) )
-        except:
-            self.default(line)
 
-    def spinAnimation(self):
-        if self.spin == False:
-            return
-        spinner = ['|', '/', '-', '\\']
-        for symbol in spinner:
-            print( f'\r{symbol} Waiting...', end="", flush=True )
-            time.sleep(0.1)
-
-    def postcmd(self, stop, line):
-        if stop:
-            # bring down listen thread on quit
-            self.peer.listenThread.stop()
-            # set our thread to be brought down
-            self.peer.cmdThread.stop()
-            time.sleep(1)
-            # send msg to our local server
-            print("Exiting...")
-        return stop
         
 # script guard, things in this script don't run automatically when imported
 if __name__ == "__main__":

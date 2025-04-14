@@ -1,5 +1,5 @@
 ''' A script uses by subprocess function calls to setup a peer object'''
-import netlib
+import libs.netlib as netlib
 import sys
 
 if __name__ == '__main__':
