@@ -2,6 +2,7 @@ import os
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 USERPATH =f"/usrs/{{user}}.pkl"
 class securityManager():
     ''' Security Manager, stores all cryptographic functions'''
@@ -23,7 +24,7 @@ class securityManager():
             length=32,                 # byte length
             salt=salt,                 # salt (noise)
             iterations=iters,          # rounds of hashing
-            backend=None
+            backend=default_backend()  # specifically here to see if this gets pywright to stop
         )
         return kdf.derive( pwd.encode() )
 
