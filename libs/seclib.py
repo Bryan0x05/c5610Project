@@ -14,9 +14,8 @@ class securityManager():
         return os.urandom( length )
     
     @staticmethod
-    def encryptPwd( pwd: str, salt : bytes, iters: int = 1_000 ) -> bytes:
-        #Password-based key derivation function 2
-
+    def encryptPwd( pwd: str, salt : bytes, iters: int = 1_000 )->bytes:
+        # Password-based key derivation function 2
         # kdf is the key derivation function
         # TODO: Actually look into if these are good values
         kdf = PBKDF2HMAC(
@@ -24,8 +23,10 @@ class securityManager():
             length=32,                 # byte length
             salt=salt,                 # salt (noise)
             iterations=iters,          # rounds of hashing
+            backend=None
         )
         return kdf.derive( pwd.encode() )
+
     
     @staticmethod
     def getUserPath( user):
