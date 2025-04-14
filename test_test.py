@@ -4,7 +4,6 @@ import time
 
 SETNODE = ("python3", "nodeSetup.py")
 # NOTE: setUp() func will run for every single test
-# TODO: Create test suites to seperate encryption testing from base networking
 class TestCases( unittest.TestCase ):
 
     @classmethod
