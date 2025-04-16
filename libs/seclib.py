@@ -2,7 +2,9 @@ import os
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes
+
 USERPATH =f"/usrs/{{user}}.pkl"
+
 class securityManager():
     ''' Security Manager, stores all cryptographic functions'''
     
@@ -17,8 +19,6 @@ class securityManager():
     @staticmethod 
     def encryptPwd( pwd: str, salt : bytes, iters: int = 1_000 ) ->bytes: # type: ignore
         ''' Encypt passsword, returns the hash in bytes '''
-        # Password-based key derivation function 2
-        # kdf is the key derivation function
         # TODO: Actually look into if these are good values
         kdf = PBKDF2HMAC(              # type: ignore
             algorithm=hashes.SHA256(), # hash func
@@ -43,8 +43,6 @@ class securityManager():
         return priKey.public_key(),priKey
     
     @staticmethod
-    # TODO: IS urandom a secure number generator?
-    # TODO: See if have need of associated data
     def encrypt( key : rsa.RSAPublicKey, plaintext: bytes ):
         '''Encrypt data using the provided key, returns ciphertext'''
         # padding here means adding randomness
