@@ -1,6 +1,6 @@
 import os
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes
 USERPATH =f"/usrs/{{user}}.pkl"
 class securityManager():
@@ -34,25 +34,39 @@ class securityManager():
         return USERPATH.format(user=user)
     
     @staticmethod
-    def generatePKCKeys() -> tuple[bytes, bytes]:
+    def generatePKCKeys() -> tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]:
         ''' Generate public and private key pair'''
-        # TODO: eval if these values make sense
-        pubKey = AESGCM.generate_key(bit_length=512)  # AES256 requires 512-bit keys for SIV
-        priKey = AESGCM.generate_key(bit_length=512)
-        return pubKey,priKey
+        priKey = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048
+        )
+        return priKey.public_key(),priKey
     
     @staticmethod
     # TODO: IS urandom a secure number generator?
     # TODO: See if have need of associated data
-    def encrypt( key : bytes, data: bytes, nonce : bytes = os.urandom(16), assoicatedData = None ):
-        ''' Encrypt data using the provided key, returns ciphertext and nonce'''
-        cipherText =  AESGCM(key).encrypt( nonce , data, assoicatedData )
-        return cipherText, nonce
+    def encrypt( key : rsa.RSAPublicKey, plaintext: bytes ):
+        '''Encrypt data using the provided key, returns ciphertext'''
+        # padding here means adding randomness
+        cipherText =  key.encrypt( plaintext, padding.OAEP(
+            mgf=padding.MGF1( algorithm= hashes.SHA256()), # mask generation
+            algorithm=hashes.SHA256(), # main hash func
+            label=None
+        ))
+        return cipherText
     
     @staticmethod
-    def decrypt( key : bytes, data: bytes, nonce: bytes, assoicatedData = None ):
-        ''' Decrypt data with the provided key and nonce'''
-        return AESGCM(key).decrypt( nonce, data, assoicatedData )
+    def decrypt( key : rsa.RSAPrivateKey, ciphertext: bytes ):
+        '''Converts cipher text to plaintext'''
+        plaintext = key.decrypt(
+        ciphertext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        ))
+        return plaintext
+
 
 if __name__ == "__main__":
     pass
