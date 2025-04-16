@@ -83,7 +83,7 @@ class securityManager():
     @staticmethod
     def generatePKCKeys() -> tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]:
         ''' Generate public and private key pair'''
-        priKey = rsa.generate_private_key(
+        priKey = rsa.generate_private_key( # type : ignore
             public_exponent=65537,
             key_size=2048
         )
