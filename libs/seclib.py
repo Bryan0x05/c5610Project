@@ -81,11 +81,11 @@ class securityManager():
         return USERPATH.format(user=user)
     
     @staticmethod
-    def generatePKCKeys() -> tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]:
+    def generatePKCKeys() -> tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]: # type : ignore
         ''' Generate public and private key pair'''
-        priKey = rsa.generate_private_key( # type : ignore
+        priKey = rsa.generate_private_key( 
             public_exponent=65537,
-            key_size=2048
+            key_size=2048,
         )
         return priKey.public_key(),priKey
     
