@@ -68,6 +68,7 @@ class netProc:
         self.socket.setblocking(False)
         self.stop = False
         self.proc = None
+        self.type = None
     
     @staticmethod
     def getPort( sock : socket.socket ) -> int:
@@ -196,8 +197,6 @@ class netProc:
         self.outboundConns.pop( self.nicknames[nickname][self.OUT] )
         self.nicknames.pop( nickname )
         
-
-        
     def connectToHost( self, hostName: str, port: int ) -> bool:
        ''' Connects by host name e.g. www.google.com '''
        return self.connectToIp( socket.gethostbyname( hostName ), port )
@@ -250,7 +249,7 @@ class netProc:
         conns = []
         for idx, key in enumerate( self.nicknames ):
             conns.append( f"{idx}. {key} => {self.nicknames[key]}" )
-        return conns
+        return conns        
     
     @staticmethod
     def readMsg( sock : socket.socket ) -> Union[Tuple[Command, List[str]], None]:
@@ -306,6 +305,7 @@ class peer(netProc):
         super().__init__( port )
         self.name = name
         self.port = port
+        self.type = nodeType.PEER
         self.ip = "No ip"
         self.subProc = subProc
         self.test = test
@@ -370,15 +370,7 @@ class peer(netProc):
                     # print ipaddr, port
                     print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
             elif msg[COM] == Command.KNOCK:
-                '''
-                # step 3
-                if msg[ARGS][0] == 'R':
-                    print(colorama.Fore.GREEN, "Handshake in progress[step3]..." + colorama.Style.RESET_ALL)
-                    self.completeHandshake( revSock, msg )
-                    print(colorama.Fore.GREEN, "Handshake done!" + colorama.Style.RESET_ALL)
-                else: # step 2 is handled in accept conn, not here.
-                    pass
-                '''
+                pass #TODO: Maybe try to pull some handshake logic out of acceptConn?
             elif msg[COM] == Command.GET_IPS:
                 # requesting us to give the list
                 if msg[ ARGS ][ 0 ] == "R":
@@ -479,7 +471,7 @@ class peer(netProc):
             return getattr(self, attrName )
         except AttributeError:
             logging.error(f"Attribute '{attrName}' not found in the object.")
-            
+
 class messageHandler():
 
     def __init__(self):

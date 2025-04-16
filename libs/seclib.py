@@ -1,12 +1,60 @@
 import os
+import typing
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes
+import logging
+
+if typing.TYPE_CHECKING:
+    import netlib # avoids circular import
 
 USERPATH =f"/usrs/{{user}}.pkl"
 
+class keyRing():
+    '''Key ring for public key infrastructure'''
+
+    def __init__(self):
+        # TODO: URI might be a tuple instead of a str
+        # TODO: Might want timestamp for expiration?
+        # keys : { user_pub_key, uri , nodeType(?),status( (!)valid ) }
+        self.keys: typing.Dict[ bytes, typing.Tuple[ str, "netlib.nodeType", bool ] ] = dict()
+    
+    def has( self, key : bytes ) -> bool:
+        if key in self.keys.keys():
+            return True
+        return False
+
+    def add( self, key : bytes, uri : str, type : "netlib.nodeType" ):
+        if self.has(key) == True:
+            logging.warning("ERR: add, adding a key that already exists")
+            return False
+        # assume  if we are adding a key, its status is true. 
+        self.keys[ key ] = ( uri, type, True )
+        return True
+    
+    def revoke( self, key : bytes):
+        ''' Set a key status to false'''
+        # NOTE: may just want a delete operation instead?
+        if self.has(key) == False:
+            logging.warning("ERR: revoke, tried revoking a non-existent key")
+            return False
+        # python tuples are imututable, we get old one and format an updated one
+        keyEntry: typing.Tuple[str, "netlib.nodeType" ] = self.keys[key][0:2]
+        # foramt new tuple with the revoked status
+        newKeyEntry: tuple[str, "netlib.nodeType", typing.Literal[False]] = (*keyEntry, False)
+        self.keys[key] = newKeyEntry
+        return True
+    def dele( self, key : bytes ):
+        ''' Delete a key entry'''
+        if self.has(key):
+            self.keys.pop( key )
+            return True
+        logging.warning("ERR: dele, Tried deleting a non-existent key")
+        return False
+    
 class securityManager():
-    ''' Security Manager, stores all cryptographic functions'''
+    '''Security Manager, stores all cryptographic functions'''
     
     def __init__(self):
         pass
