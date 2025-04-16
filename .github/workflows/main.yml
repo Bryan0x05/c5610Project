@@ -11,6 +11,11 @@ jobs:
       - name: checkout  repository
         uses: actions/checkout@v4
 
+      - name: Set up Python 3.8.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8.10'
+
       - name: Configure Py env
         run: |
            python -m venv .venv
