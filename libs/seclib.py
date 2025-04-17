@@ -1,7 +1,7 @@
 import os
 import typing
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes
 import logging
 
@@ -66,8 +66,6 @@ class securityManager():
     @staticmethod 
     def encryptPwd( pwd: str, salt : bytes, iters: int = 1_000 ) ->bytes: # type: ignore
         ''' Encypt passsword, returns the hash in bytes '''
-        # Password-based key derivation function 2
-        # kdf is the key derivation function
         # TODO: Actually look into if these are good values
         kdf = PBKDF2HMAC(              # type: ignore
             algorithm=hashes.SHA256(), # hash func
@@ -83,38 +81,37 @@ class securityManager():
         return USERPATH.format(user=user)
     
     @staticmethod
-    def generatePKCKeys() -> typing.Tuple[bytes, bytes]:
+    def generatePKCKeys() -> tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]: # type:ignore
         ''' Generate public and private key pair'''
-        # TODO: eval if these values make sense
-        pubKey: bytes = AESGCM.generate_key(bit_length=512)  # AES256 requires 512-bit keys for SIV
-        priKey: bytes = AESGCM.generate_key(bit_length=512)
-        return pubKey,priKey
+        priKey = rsa.generate_private_key( # type:ignore
+            public_exponent=65537,         # type:ignore
+            key_size=2048,                 # type:ignore
+        )
+        return priKey.public_key(),priKey  # type:ignore
     
     @staticmethod
-    # TODO: IS urandom a secure number generator?
-    # TODO: See if have need of associated data
-    # TODO: data cannot be greater than 64 bytes! (see max size of AESGCM)
-    def encrypt( key : bytes, data: bytes, nonce : bytes = os.urandom(16), assoicatedData = None ):
-        ''' Encrypt data using the provided key, returns ciphertext and nonce'''
-        cipherText =  AESGCM(key).encrypt( nonce , data, assoicatedData )
-        return cipherText, nonce
+    def encrypt( key : rsa.RSAPublicKey, plaintext: bytes ):
+        '''Encrypt data using the provided key, returns ciphertext'''
+        # padding here means adding randomness
+        cipherText =  key.encrypt( plaintext, padding.OAEP(
+            mgf=padding.MGF1( algorithm= hashes.SHA256()), # mask generation
+            algorithm=hashes.SHA256(), # main hash func
+            label=None
+        ))
+        return cipherText
     
     @staticmethod
-    def decrypt( key : bytes, data: bytes, nonce: bytes, assoicatedData = None ):
-        ''' Decrypt data with the provided key and nonce'''
-        return AESGCM(key).decrypt( nonce, data, assoicatedData )
-    
-    @staticmethod
-    def validateSignature( sig : bytes, nonce: bytes, key : bytes, assoicatedData = None):
-        '''Attempt to eval provided signature (w/ nonce that was used) with given key'''
-        # sig should be CA_pub_key.encrypt( user_pub_key)
-        
-        # Decrypt with CA private key.
-        # TODO: Double check that we actually mak private, public key pairs correctly.
-        aesgcm = AESGCM(key)
-        # return user_pub_key, another function will look it up in the public key rin
-        return aesgcm.decrypt( nonce, sig, assoicatedData)
-        
+    def decrypt( key : rsa.RSAPrivateKey, ciphertext: bytes ):
+        '''Converts cipher text to plaintext'''
+        plaintext = key.decrypt(
+        ciphertext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        ))
+        return plaintext
+
 
 if __name__ == "__main__":
     pass
