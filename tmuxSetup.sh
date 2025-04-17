@@ -1,4 +1,4 @@
-.#!/bin/bash
+#!/bin/bash
 # Script create a split terminal and start up peer objects
 echo "Starting the script"
 

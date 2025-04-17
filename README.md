@@ -1,8 +1,10 @@
 # cs5610Project
 
 ## requirements
-* Linux ( Ubuntu )
-* Python >= 3.8.1
+* Ubuntu LTS ==  20.04.6 
+* Python == 3.8.10
+* Python modules in requirements.txt ( pip install -r requirements.txt )
+* Bash
 * Tmux
 
 ## How to run

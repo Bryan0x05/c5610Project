@@ -11,7 +11,7 @@ import os
 import subprocess
 import pty
 import colorama
-from libs.clilib import shell
+import libs.clilib as clilib
 # import curses # linux based module for terminal formatting
 
 # argument seperator
@@ -26,13 +26,14 @@ class Command(Enum):
     KILL_SERVER = 5  # Node <-> Node: Kill the peer process
     KILL_NETWORK = 6 # Node <-> Node: Kill the entire network by sending the message to all other nodes
     GET_IPS = 7      # Node <-> Node: Give me all the ip addresses you are connected too.
+    SHUTDWN = 8      # Node <-> Node: Connected peer is shutting down.
 
 class nodeType(Enum):
     PEER = 0
     CA = 1
 
 logging.basicConfig(level=logging.DEBUG)
-
+# NOTE / TODO: Known issue, threadplus doesn't like arguments. WIP.
 class threadPlus ( threading.Thread ):
     ''' Thread wrapper to externally killed in a safe manner'''
     def __init__(self, *args, **kwargs) -> None:
@@ -100,7 +101,6 @@ class netProc:
         
     def completeHandshake( self, inSock : socket.socket, msg: Tuple[Command, List[str]] ) -> bool:
         ''''Accepts Step 3 of the handshake reply, terminates handshake'''
-        print("in complete handshake")
         try:
             # the reply handshake should be to an existing already in-use conID
             replyConId = int(msg[self.ARGS][1])
@@ -128,7 +128,6 @@ class netProc:
             # Despite accepting this connection the other peer actually doesn't know to listen to this port so its only 1-way.
             inSock, peerAddrAndPort = self.socket.accept()
             logging.debug(f"Accept connection from: {peerAddrAndPort}, on socket: {inSock.getsockname()}")
-            print(colorama.Fore.GREEN, "Accepted connection, handshake in progress..." + colorama.Style.RESET_ALL)
             inSock.setblocking( False)
             msg = None
             while msg == None:
@@ -178,25 +177,32 @@ class netProc:
             self.outboundConns[ (ipAddr, port) ] = outSock
             self.nicknames [ self.conID ] = ( self.nicknames[self.conID][self.IN], (ipAddr, port) )
             self.conID += 1
-            print(colorama.Fore.GREEN, "Handshake in progress..step 2" + colorama.Style.RESET_ALL)
+            print( colorama.Fore.GREEN + "New peer detected, run \"listsockets\" for more info"
+                  + colorama.Style.RESET_ALL )
+            # reprint shell prompt to make it look clean
+            print( clilib.PROMPT, end="" ) 
             return True
         except Exception:
             logging.error( traceback.format_exc )
             return False
 
-    def closeConn( self, nickname : int ):
+    def closeConn( self, nickname : int, msgFlag : bool = True ):
         outSock : socket.socket = self.getSockByNickname( nickname )
-        inSock = self.inboundConns[ self.nicknames[nickname][self.OUT] ]
-
-        # TODO: Send a message telling our peers we have closed our side.
+        inSock = self.inboundConns[ self.nicknames[nickname][self.IN] ]
+        
+        # Tell the other peer we are closing our sockets pair with them
+        # If this function isn't invoked as a response of receiving one.
+        if msgFlag:
+            self.sendMsg( nickname, messageHandler.encode_message(
+                Command.SHUTDWN,
+            ))
+        
         outSock.close()
         inSock.close()
-        # TODO: Replace this with a message / command to let the other server know to also clean
-        # up the connection their end and update their dictionary.
         self.inboundConns.pop( self.nicknames[nickname][self.IN])
         self.outboundConns.pop( self.nicknames[nickname][self.OUT] )
         self.nicknames.pop( nickname )
-        
+
     def connectToHost( self, hostName: str, port: int ) -> bool:
        ''' Connects by host name e.g. www.google.com '''
        return self.connectToIp( socket.gethostbyname( hostName ), port )
@@ -205,13 +211,15 @@ class netProc:
         ''' Connects by ipv4 address '''
         try:
             outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+            outSock.settimeout(10) # default timeout is really long!
             if ( targetIpAddr, targetPort ) in self.outboundConns:
                 logging.debug(f"Already connected to {targetIpAddr}:{targetPort}" )
             else:
                 outSock.connect( (targetIpAddr, targetPort) )
                 # step 1 of the handshake
                 outSock.sendall( messageHandler.encode_message(Command.KNOCK, self.conID, self.port ) )
-                outSock.setblocking(False)
+                # replace timeout with non-blocking
+                outSock.setblocking( False )
                 ipAddr, port = outSock.getsockname()
                 self.outboundConns[ (ipAddr, port) ] = outSock
                 self.nicknames[self.conID ] = ( tuple(), ( ipAddr, port ) )
@@ -219,10 +227,15 @@ class netProc:
                 logging.debug(f" Connected to {ipAddr}:{port}, connection nickname: {self.conID} ")
             return True
         # using Exception to exclude base exceptions like SystemExit or keyboardinterrupt
+        except TimeoutError:
+            print(colorama.Fore.RED+"makeConn timed out!" + colorama.Style.RESET_ALL)
         except Exception:
+            # TODO: Figure out why this prints on a timeout error despite being caught 
+            # in the block above
+            
             # prints last exception and traceback to stderr
             logging.error( traceback.format_exc() )
-            return False
+        return False
     
     def getSockByNickname( self, nickname: int ) -> socket.socket:
         ''' Returns the socket object associated with the nickname'''
@@ -294,9 +307,12 @@ class netProc:
     
     def shutDown( self ):
         ''' graceful shutdown '''
-        for key, sock in self.outboundConns.items():
-            sock.shutdown(socket.SHUT_RDWR)
-            sock.close()
+        # close all our socket pairs and let our peers know we're going down
+        nicks = list( self.nicknames.keys() )
+        # This avoids looping over a dictionary while we modify it.
+        for nick in nicks:
+            self.closeConn( nick )
+        # close our server socket
         self.socket.close()
         exit(0)
 
@@ -324,7 +340,7 @@ class peer(netProc):
     def runLoop( self ):
         ''' Do all the client things '''
         # interactive console thread
-        sh = shell( peer=self)
+        sh = clilib.shell( peer=self)
         self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
         # listen for msgs and replies
         self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread" )
@@ -388,6 +404,18 @@ class peer(netProc):
                                 print(f"Connection made to: {ip}:{self.port}")
                             else:
                                 print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
+            elif msg[COM] == Command.SHUTDWN:
+                # peer shutdowm their socket peer with us, update our local dictionary to reflect that
+                revInfo = revSock.getsockname()
+                print(f"revInfo: {revInfo}")
+                revNick = -1
+                for nick, ipAndPort in self.nicknames.items():
+                    if ipAndPort[self.IN] == revInfo:
+                        revNick = nick
+                if revNick == -1:
+                    logging.error( "SHUTDWN: Couldn't find peer nickname")
+                else:
+                    self.closeConn( revNick, False )
             else:
                 logging.debug("Peer default case reached:")
                 pprint.pprint(msg)
@@ -410,6 +438,7 @@ class peer(netProc):
         return self.sendMsg(nickname, messageHandler.encode_message(Command.HEARTBEAT, "S", self.ip, self.port) )
          
     def knock(self, ip_addr, port) -> bool:
+        print(colorama.Fore.GREEN, f"Connecting to {ip_addr}:{port}..." + colorama.Style.RESET_ALL )
         if self.connectToIp( ip_addr, port ):
             print(colorama.Fore.GREEN, f"Connected to {ip_addr}:{port}" + colorama.Style.RESET_ALL )
             return True
