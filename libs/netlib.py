@@ -11,7 +11,7 @@ import os
 import subprocess
 import pty
 import colorama
-from libs.clilib import shell
+import libs.clilib  as clilib
 import libs.seclib as seclib
 # import curses # linux based module for terminal formatting
 
@@ -39,7 +39,7 @@ class nodeType(Enum):
     CA = 1
 
 logging.basicConfig(level=logging.DEBUG)
-
+# NOTE / TODO: Known issue, threadplus doesn't like arguments. WIP.
 class threadPlus ( threading.Thread ):
     ''' Thread wrapper to externally killed in a safe manner'''
     def __init__(self, *args, **kwargs) -> None:
@@ -138,7 +138,6 @@ class netProc:
         
     def completeHandshake( self, inSock : socket.socket, msg: Tuple[Command, List[str]] ) -> bool:
         ''''Accepts Step 3 of the handshake reply, terminates handshake'''
-        print("in complete handshake")
         try:
             # the reply handshake should be to an existing already in-use conID
             replyConId = int(msg[self.ARGS][1])
@@ -167,7 +166,6 @@ class netProc:
             # Despite accepting this connection the other peer actually doesn't know to listen to this port so its only 1-way.
             inSock, peerAddrAndPort = self.socket.accept()
             logging.debug(f"Accept connection from: {peerAddrAndPort}, on socket: {inSock.getsockname()}")
-            print(colorama.Fore.GREEN, "Accepted connection, handshake in progress..." + colorama.Style.RESET_ALL)
             inSock.setblocking( False)
             msg = None
             while msg == None:
@@ -217,7 +215,10 @@ class netProc:
             self.outboundConns[ (ipAddr, port) ] = outSock
             self.nicknames [ self.conID ] = ( self.nicknames[self.conID][self.IN], (ipAddr, port), f"{replyIp}:{replyPort}" )
             self.conID += 1
-            print(colorama.Fore.GREEN, "Handshake in progress..step 2" + colorama.Style.RESET_ALL)
+            print( colorama.Fore.GREEN + "New peer detected, run \"listsockets\" for more info"
+                  + colorama.Style.RESET_ALL )
+            # reprint shell prompt to make it look clean
+            print( clilib.PROMPT, end="" ) 
             return True
         except Exception:
             logging.error( traceback.format_exc )
@@ -233,13 +234,12 @@ class netProc:
             self.sendMsg( nickname, messageHandler.encode_message(
                 Command.SHUTDWN,
             ))
-
         outSock.close()
         inSock.close()
         self.inboundConns.pop( self.nicknames[nickname][self.IN])
         self.outboundConns.pop( self.nicknames[nickname][self.OUT] )
         self.nicknames.pop( nickname )
-        
+
     def connectToHost( self, hostName: str, port: int ) -> bool:
        ''' Connects by host name e.g. www.google.com '''
        return self.connectToIp( socket.gethostbyname( hostName ), port )
@@ -248,13 +248,15 @@ class netProc:
         ''' Connects by ipv4 address '''
         try:
             outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
+            outSock.settimeout(10) # default timeout is really long!
             if ( targetIpAddr, targetPort ) in self.outboundConns:
                 logging.debug(f"Already connected to {targetIpAddr}:{targetPort}" )
             else:
                 outSock.connect( (targetIpAddr, targetPort) )
                 # step 1 of the handshake
                 outSock.sendall( messageHandler.encode_message(Command.KNOCK, self.conID, self.port ) )
-                outSock.setblocking(False)
+                # replace timeout with non-blocking
+                outSock.setblocking( False )
                 ipAddr, port = outSock.getsockname()
                 self.outboundConns[ (ipAddr, port) ] = outSock
                 self.nicknames[self.conID ] = ( tuple(), ( ipAddr, port ), f"{targetIpAddr}:{targetPort}" )
@@ -262,10 +264,15 @@ class netProc:
                 logging.debug(f" Connected to {ipAddr}:{port}, connection nickname: {self.conID} ")
             return True
         # using Exception to exclude base exceptions like SystemExit or keyboardinterrupt
+        except TimeoutError:
+            print(colorama.Fore.RED+"makeConn timed out!" + colorama.Style.RESET_ALL)
         except Exception:
+            # TODO: Figure out why this prints on a timeout error despite being caught 
+            # in the block above
+            
             # prints last exception and traceback to stderr
             logging.error( traceback.format_exc() )
-            return False
+        return False
     
     def getSockByNickname( self, nickname: int ) -> socket.socket:
         ''' Returns the socket object associated with the nickname'''
@@ -371,17 +378,20 @@ class CA(netProc):
         self.acceptConn()
         msg = self.checkForMsgs()
         if msg is None:
+            return # contine
+        revSock = msg[1]
+        msg = msg[0]
+        if msg is None:
             return False # effectively continue
-       
+        revNick = -1
         if msg[COM] == Command.CHECK_KEY or msg[COM] == Command.REG_KEY: # TODO: make look good
-            revSock = msg[1]
-            msg = msg[0]
+
             logging.debug(f"CA read: {msg} from {revSock}")
             key = seclib.securityManager.decrypt( self.prikey, (msg[ARGS][0]).encode() )
             keyObj = seclib.securityManager.deserializePubKey( key )
             revInfo = revSock.getsockname()
             print(f"revInfo: {revInfo}")
-            revNick = -1
+
             for nick, ipAndPort in self.nicknames.items():
                 if ipAndPort[self.IN] == revInfo:
                     revNick = nick
@@ -394,12 +404,14 @@ class CA(netProc):
                     self.sendMsg( revNick, messageHandler.encode_message(Command.CHECK_KEY, key.decode(), "T", self.keyring[uri][0] ) )
                 else:
                     self.sendMsg( revNick, messageHandler.encode_message(Command.CHECK_KEY, key.decode(), "F" ) )
+                self.closeConn( revNick, True )
             elif msg[COM] == Command.REG_KEY:
                 # Register key with the URI of the sender, so they can't easily pretend to be another URI
                 if self.keyring.add( self.nicknames[revNick][self.URI], keyObj, nodeType.PEER ):
                     self.sendMsg( revNick, messageHandler.encode_message(Command.REG_KEY, "T" ) )
                 else:
                     self.sendMsg( revNick, messageHandler.encode_message(Command.REG_KEY, "F" ) )
+                    self.closeConn( revNick, True )
         elif msg[COM] == Command.HEARTBEAT:
             # Someone is asking us to send a heartbeat
             if msg[ARGS][0] == "R":
@@ -411,7 +423,7 @@ class CA(netProc):
             logging.warning("CA, default case reached!")
         # close the connection and inform the peer we're closing it.
         # CA will always close the socket.
-        self.closeConn( revNick, True )
+
         # do not stop
         return False
     
@@ -434,7 +446,7 @@ class peer(netProc):
     def runLoop( self ):
         ''' Do all the client things '''
         # interactive console thread
-        sh = shell( peer=self)
+        sh = clilib.shell( peer=self)
         self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
         # listen for msgs and replies
         self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread" )
@@ -511,8 +523,8 @@ class peer(netProc):
             recvKey = msg[ARGS][0]
             recvKeyObj = seclib.securityManager.deserializePubKey( recvKey.encode() )
             # add the key if we don't have it on keyring
-            if not self.keyring.has(recvKeyObj ):
-                self.keyring.add( recvKeyObj, uri,  nodeType.PEER )
+            if not self.keyring.has( uri ):
+                self.keyring.add( uri, recvKeyObj,  nodeType.PEER )
             if msg[ARGS][1] == "R": # reply case, don't need to send our key
                 pass
             else: # send case, we need to send back our key
@@ -550,6 +562,7 @@ class peer(netProc):
         return True
          
     def knock(self, ip_addr, port) -> bool:
+        print(colorama.Fore.GREEN, f"Connecting to {ip_addr}:{port}..." + colorama.Style.RESET_ALL )
         if self.connectToIp( ip_addr, port ):
             print(colorama.Fore.GREEN, f"Connected to {ip_addr}:{port}" + colorama.Style.RESET_ALL )
             return True

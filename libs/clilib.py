@@ -9,11 +9,11 @@ import getpass
 import pickle
 
 STOR = "./usrs"
-
+PROMPT = "shell>"
 class shell(cmd.Cmd):
     intro = "Type help to get started\n"
     
-    prompt = "shell>"
+    prompt = PROMPT
 
     def __init__(self, peer, spin : bool = True ):
         super().__init__()
@@ -44,6 +44,7 @@ class shell(cmd.Cmd):
         
     def do_quit( self, _ ):
         '''exits the shell & terminates client'''
+        # Also see what happens in postcmd()
         self.peer.up = False
         return True
     
@@ -53,6 +54,7 @@ class shell(cmd.Cmd):
         
     def do_makeConn(self, line: str):
         ''' Connect to a given < ipAddr(x.x.x.x) > < port >'''
+        from libs.netlib import threadPlus
         try:
             args = line.split()
             ipAddr = args[0]
@@ -60,6 +62,8 @@ class shell(cmd.Cmd):
         except:
             self.default(line)
             return
+        spinThread = threadPlus( target = self.spinAnimation )
+        spinThread.start()
         # Sends msg to local server to forward this message to the corresponding socket
         self.peer.knock( ipAddr, port)
 
@@ -134,10 +138,13 @@ class shell(cmd.Cmd):
     def spinAnimation(self):
         if self.spin == False:
             return
+        
         spinner = ['|', '/', '-', '\\']
         for symbol in spinner:
-            print( f'\r{symbol} Waiting...', end="", flush=True )
-            time.sleep(0.1)
+            print( colorama.Fore.GREEN + f'\r{symbol} Waiting...' + colorama.Style.RESET_ALL, 
+                  end="", flush=True )
+            time.sleep(0.5)
+
 
     def postcmd(self, stop, line):
         if stop:
