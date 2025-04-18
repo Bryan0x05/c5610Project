@@ -2,3 +2,4 @@
 .vscode/
 __pycache__/
 usrs/
+.python-version

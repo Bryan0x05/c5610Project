@@ -2,6 +2,7 @@ import os
 import typing
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes
 import logging
 
@@ -16,41 +17,32 @@ class keyRing():
     def __init__(self):
         # TODO: URI might be a tuple instead of a str
         # TODO: Might want timestamp for expiration?
-        # keys : { user_pub_key, uri , nodeType(?),status( (!)valid ) }
-        self.keys: typing.Dict[ bytes, typing.Tuple[ str, "netlib.nodeType", bool ] ] = dict()
+        # { uri : ( pub_key , nodeType(?) ) }
+        self.keys: typing.Dict[  str, typing.Tuple[ rsa.RSAPublicKey, "netlib.nodeType" ] ] = dict()
     
-    def has( self, key : bytes ) -> bool:
-        if key in self.keys.keys():
+    def has( self, uri : str ) -> bool:
+        if uri in self.keys.keys():
             return True
         return False
 
-    def add( self, key : bytes, uri : str, type : "netlib.nodeType" ):
-        if self.has(key) == True:
+    def add( self, uri : str, key :  rsa.RSAPublicKey, type : "netlib.nodeType" ):
+        if self.has(uri) == True:
             logging.warning("ERR: add, adding a key that already exists")
             return False
         # assume  if we are adding a key, its status is true. 
-        self.keys[ key ] = ( uri, type, True )
+        self.keys[ uri ] = ( key, type )
         return True
     
-    def revoke( self, key : bytes):
-        ''' Set a key status to false'''
-        # NOTE: may just want a delete operation instead?
-        if self.has(key) == False:
-            logging.warning("ERR: revoke, tried revoking a non-existent key")
-            return False
-        # python tuples are imututable, we get old one and format an updated one
-        keyEntry: typing.Tuple[str, "netlib.nodeType" ] = self.keys[key][0:2]
-        # foramt new tuple with the revoked status
-        newKeyEntry: tuple[str, "netlib.nodeType", typing.Literal[False]] = (*keyEntry, False)
-        self.keys[key] = newKeyEntry
-        return True
-    def dele( self, key : bytes ):
+    def delete( self, uri : str ):
         ''' Delete a key entry'''
-        if self.has(key):
-            self.keys.pop( key )
+        if self.has(uri):
+            self.keys.pop( uri )
             return True
-        logging.warning("ERR: dele, Tried deleting a non-existent key")
+        logging.warning("ERR: dele, Tried deleting a non-existent uri")
         return False
+    
+    def __getitem__(self, uri :  str):
+        return self.keys[uri]
     
 class securityManager():
     '''Security Manager, stores all cryptographic functions'''
@@ -76,7 +68,7 @@ class securityManager():
         return kdf.derive( pwd.encode() )# type: ignore
     
     @staticmethod
-    def getUserPath( user):
+    def getUserPath( user ):
         ''' Fills in the blank on the userpath'''
         return USERPATH.format(user=user)
     
@@ -99,6 +91,24 @@ class securityManager():
             label=None
         ))
         return cipherText
+    
+    @staticmethod
+    def serializePubKey( key : rsa.RSAPublicKey ):
+        keyBytes = key.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        return keyBytes
+
+    @staticmethod
+    def deserializePubKey( key : bytes ) ->  rsa.RSAPublicKey:
+        keypub = serialization.load_der_public_key(
+            key
+        )
+        # TODO: fix later
+        if isinstance( keypub, rsa.RSAPublicKey):
+            return keypub
+        raise Exception("SecurityManager failed to deserialize key")
     
     @staticmethod
     def decrypt( key : rsa.RSAPrivateKey, ciphertext: bytes ):

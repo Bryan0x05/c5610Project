@@ -12,10 +12,13 @@ import subprocess
 import pty
 import colorama
 from libs.clilib import shell
+import libs.seclib as seclib
 # import curses # linux based module for terminal formatting
 
 # argument seperator
 ASEP = "|"
+COM = 0
+ARGS = 1
 
 class Command(Enum):
     GET_DICT = 0     # Node <-> Node: Get nickname dictionary from Node
@@ -26,6 +29,10 @@ class Command(Enum):
     KILL_SERVER = 5  # Node <-> Node: Kill the peer process
     KILL_NETWORK = 6 # Node <-> Node: Kill the entire network by sending the message to all other nodes
     GET_IPS = 7      # Node <-> Node: Give me all the ip addresses you are connected too.
+    SHUTDWN = 8      # Node <-> Node: Connected peer is shutting down.
+    CHECK_KEY = 9    # Node <-> CA: Validate this public key
+    REG_KEY  = 10    # Node <-> CA: Register this key with the CA
+    XCHNG_KEY  = 11  # Node <-> Node: Exchange public keys.
 
 class nodeType(Enum):
     PEER = 0
@@ -54,14 +61,20 @@ class netProc:
     IN = 0
     OUT = 1
     ARGS = 1
-    def __init__( self, port: int):
+    URI = 2
+    # URI: sever_ip(listening socket ip):port
+    
+    def __init__( self, port: int, name: str = "_"):
+        self.keypub, self.prikey = seclib.securityManager.generatePKCKeys()
+        self.keyring = seclib.keyRing()
         self.port = port
         # 0 means the client/server socket in our node
         self.conID = 1
+        self.name = name
         self.outboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = dict()
         self.inboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = dict()
         # keyed by int, with a 2-tuple of 2tuples each holding str,int pair
-        self.nicknames: typing.Dict[ int, Tuple[ Tuple[str, int], Tuple[str, int] ] ] = dict()
+        self.nicknames: typing.Dict[ int, Tuple[ Tuple[str, int], Tuple[str, int], str ] ] = dict()
         self.uris: typing.Dict[ Tuple [ str, int ], nodeType ] = dict() #TODO implement
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
@@ -69,6 +82,14 @@ class netProc:
         self.stop = False
         self.proc = None
         self.type = None
+        self.ip = "_"
+        self.up = False
+
+    @property
+    def uri(self) -> str:
+        if self.up:
+            return f"{self.ip}:{self.port}"
+        raise Exception("URI. URI not set yet")
     
     @staticmethod
     def getPort( sock : socket.socket ) -> int:
@@ -96,7 +117,24 @@ class netProc:
             logging.error( traceback.format_exc )
             # return loopback intf for our local machine
             # NOTE: This means we are unable to connect outside of our own machine
-            return "127.0.0.1" 
+            return "127.0.0.1"
+        
+    def start(self):
+        self.up = True
+        try:
+            # Allow socket re-use to get around linux wait state
+            # basically lets you spam run the script without changing the port numbers in Linux.
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind( ( netProc.getLanIp() , self.port ) )
+            # if port = 0, the OS picks one for us, and we find out what it is here.
+            self.port = netProc.getPort( self.socket )
+            self.ip = self.getIp( self.socket )
+            logging.debug(f"{self.name} socket up on: {self.ip}:{self.port}")
+            # OS should manage this queue, so its non-blocking to us.
+            self.socket.listen( 5 )
+        except:
+            logging.error( traceback.format_exc() )
+            exit(-1)
         
     def completeHandshake( self, inSock : socket.socket, msg: Tuple[Command, List[str]] ) -> bool:
         ''''Accepts Step 3 of the handshake reply, terminates handshake'''
@@ -110,7 +148,8 @@ class netProc:
             
             self.inboundConns[ inSock.getsockname() ] = inSock
             outSockInfo = self.nicknames[ replyConId ][self.OUT]
-            self.nicknames[ replyConId ] = ( inSock.getsockname(), (outSockInfo) )
+            uri = self.nicknames[ replyConId ][self.URI]
+            self.nicknames[ replyConId ] = ( inSock.getsockname(), (outSockInfo), uri )
         except BlockingIOError:
             # logging.error( traceback.format_exc() ) # uncomment this at your own sanity
             return False
@@ -141,7 +180,7 @@ class netProc:
                 print(f"acceptConn read: {msg}")
                 self.inboundConns[ inSock.getsockname() ]  = inSock
                 # partial dict update
-                self.nicknames[ self.conID ] = (  inSock.getsockname() ,tuple() )
+                self.nicknames[ self.conID ] = (  inSock.getsockname() ,tuple(), "_" )
                 # conID and several dicts are updated in here
                 return self.handshakeMid( peerAddrAndPort, msg )
             elif msg[self.ARGS][0] == 'R': # step 3 of handshake ( creates duplex conn with 2 sockets )
@@ -176,7 +215,7 @@ class netProc:
             outSock.setblocking(False)
             ipAddr, port = outSock.getsockname()
             self.outboundConns[ (ipAddr, port) ] = outSock
-            self.nicknames [ self.conID ] = ( self.nicknames[self.conID][self.IN], (ipAddr, port) )
+            self.nicknames [ self.conID ] = ( self.nicknames[self.conID][self.IN], (ipAddr, port), f"{replyIp}:{replyPort}" )
             self.conID += 1
             print(colorama.Fore.GREEN, "Handshake in progress..step 2" + colorama.Style.RESET_ALL)
             return True
@@ -184,15 +223,19 @@ class netProc:
             logging.error( traceback.format_exc )
             return False
 
-    def closeConn( self, nickname : int ):
+    def closeConn( self, nickname : int, msgFlag : bool = True ):
         outSock : socket.socket = self.getSockByNickname( nickname )
-        inSock = self.inboundConns[ self.nicknames[nickname][self.OUT] ]
+        inSock = self.inboundConns[ self.nicknames[nickname][self.IN] ]
+        
+        # Tell the other peer we are closing our sockets pair with them
+        # If this function isn't invoked as a response of receiving one.
+        if msgFlag:
+            self.sendMsg( nickname, messageHandler.encode_message(
+                Command.SHUTDWN,
+            ))
 
-        # TODO: Send a message telling our peers we have closed our side.
         outSock.close()
         inSock.close()
-        # TODO: Replace this with a message / command to let the other server know to also clean
-        # up the connection their end and update their dictionary.
         self.inboundConns.pop( self.nicknames[nickname][self.IN])
         self.outboundConns.pop( self.nicknames[nickname][self.OUT] )
         self.nicknames.pop( nickname )
@@ -214,7 +257,7 @@ class netProc:
                 outSock.setblocking(False)
                 ipAddr, port = outSock.getsockname()
                 self.outboundConns[ (ipAddr, port) ] = outSock
-                self.nicknames[self.conID ] = ( tuple(), ( ipAddr, port ) )
+                self.nicknames[self.conID ] = ( tuple(), ( ipAddr, port ), f"{targetIpAddr}:{targetPort}" )
                 self.conID += 1
                 logging.debug(f" Connected to {ipAddr}:{port}, connection nickname: {self.conID} ")
             return True
@@ -271,7 +314,16 @@ class netProc:
             return messageHandler.decode_message( msg )
         else:
             return None
-        
+    
+    def checkForMsgs( self ):
+        ''' Check for a message from all our sockets, returning the first one found'''
+        # unitTests seem to getting stuck in the floor when self.connections is empty
+        for _, sock in self.inboundConns.items():
+            msg = netProc.readMsg( sock )
+            if msg is not None:
+                return (msg, sock)
+        return None
+
     def sendConnIps( self, nickname: int ):
         ''' Send a list of all ip addrs we are connected to'''
         peers: list[str] = [ ip for ( ip, _ ) in self.outboundConns.keys() ]
@@ -282,6 +334,10 @@ class netProc:
         ''' Send a message through a socket corresponding to the nickname '''
         if self.nicknameExists( nickname ):
             try:
+                # if we have a key for it
+                self.nicknames[nickname][self.URI]
+                # TODO: add local decryption and encryption for send adn read msg if valid keyring entry
+                # if self.keyring.has( )
                 self.getSockByNickname(nickname).sendall( msg )
                 return True
             except Exception:
@@ -294,16 +350,79 @@ class netProc:
     
     def shutDown( self ):
         ''' graceful shutdown '''
-        for key, sock in self.outboundConns.items():
-            sock.shutdown(socket.SHUT_RDWR)
-            sock.close()
+        # close all our socket pairs and let our peers know we're going down
+        nicks = list( self.nicknames.keys() )
+        # This avoids looping over a dictionary while we modify it.
+        for nick in nicks:
+            self.closeConn( nick )
+        # close our server socket
         self.socket.close()
         exit(0)
 
+    def heartbeat_request(self, nickname) -> bool:
+        return self.sendMsg(nickname, messageHandler.encode_message(Command.HEARTBEAT, "S", self.ip, self.port) )
+    
+class CA(netProc):
+    def __init__( self, port: int = 0, name: str = "_ " ):
+        self.name = name
+        super().start()
+            
+    def listenLoop( self ):
+        self.acceptConn()
+        msg = self.checkForMsgs()
+        if msg is None:
+            return False # effectively continue
+       
+        if msg[COM] == Command.CHECK_KEY or msg[COM] == Command.REG_KEY: # TODO: make look good
+            revSock = msg[1]
+            msg = msg[0]
+            logging.debug(f"CA read: {msg} from {revSock}")
+            key = seclib.securityManager.decrypt( self.prikey, (msg[ARGS][0]).encode() )
+            keyObj = seclib.securityManager.deserializePubKey( key )
+            revInfo = revSock.getsockname()
+            print(f"revInfo: {revInfo}")
+            revNick = -1
+            for nick, ipAndPort in self.nicknames.items():
+                if ipAndPort[self.IN] == revInfo:
+                    revNick = nick
+            if revNick == -1:
+                logging.error("CA, couldn't resolve nickname to reply to socket")
+                return False # continue
+            if msg[COM] == Command.CHECK_KEY:
+                uri =  msg[ARGS][1]
+                if self.keyring.has( uri ):
+                    self.sendMsg( revNick, messageHandler.encode_message(Command.CHECK_KEY, key.decode(), "T", self.keyring[uri][0] ) )
+                else:
+                    self.sendMsg( revNick, messageHandler.encode_message(Command.CHECK_KEY, key.decode(), "F" ) )
+            elif msg[COM] == Command.REG_KEY:
+                # Register key with the URI of the sender, so they can't easily pretend to be another URI
+                if self.keyring.add( self.nicknames[revNick][self.URI], keyObj, nodeType.PEER ):
+                    self.sendMsg( revNick, messageHandler.encode_message(Command.REG_KEY, "T" ) )
+                else:
+                    self.sendMsg( revNick, messageHandler.encode_message(Command.REG_KEY, "F" ) )
+        elif msg[COM] == Command.HEARTBEAT:
+            # Someone is asking us to send a heartbeat
+            if msg[ARGS][0] == "R":
+                self.heartbeat_request( int( msg[ARGS][0] ))
+            else: # S, someone is telling us their heartbeat
+                # print ipaddr, port
+                print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
+        else:
+            logging.warning("CA, default case reached!")
+        # close the connection and inform the peer we're closing it.
+        # CA will always close the socket.
+        self.closeConn( revNick, True )
+        # do not stop
+        return False
+    
+    def start( self ):
+        self.stop = False
+        while not self.stop:
+            self.stop = self.listenLoop()
+
 class peer(netProc):
     def __init__(self, port: int = 0, name: str = "_", subProc = False, debug = False, test = False ):
-        super().__init__( port )
-        self.name = name
+        super().__init__( port, name )
         self.port = port
         self.type = nodeType.PEER
         self.ip = "No ip"
@@ -311,15 +430,6 @@ class peer(netProc):
         self.test = test
         self.debug = debug
         ( logging.getLogger() ).disabled = not debug
-    
-    def checkForMsgs( self ):
-        ''' Check for a message from all our sockets, returning the first one found'''
-        # unitTests seem to getting stuck in the floor when self.connections is empty
-        for _, sock in self.inboundConns.items():
-            msg = netProc.readMsg( sock )
-            if msg is not None:
-                return (msg, sock)
-        return None
 
     def runLoop( self ):
         ''' Do all the client things '''
@@ -340,57 +450,90 @@ class peer(netProc):
 
     def listenLoop( self ):
         ''' Do all the server/client things '''
-        COM = 0
-        ARGS = 1
         
         # see if there are any new connections
         self.acceptConn()
         # see if there are any new messages on existing connections
         readMsg: Union[Tuple[Tuple[Command, List[str]], socket.socket], None] = self.checkForMsgs()
+        if readMsg is None:
+            return # continune
+        revSock = readMsg[1]
+        revInfo = revSock.getsockname()
+        msg: Tuple[Command, List[str]] = readMsg[0]
+        recvNick = -1
         
-        if readMsg is not None:
-            revSock = readMsg[1]
-            msg: Tuple[Command, List[str]] = readMsg[0]
-            logging.debug(f"Server read msg: {msg}")
-            if msg[COM] == Command.KILL_SERVER:
-                self.kill_peer()
-            elif msg[COM] == Command.KILL_NETWORK:
-                self.kill_network()
-            elif msg[COM] == Command.SEND_MSG:
-                nick = int( msg[ARGS][0] )
-                self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
-            elif msg[COM] == Command.RECV_MSG:
-                msgRecv = msg[ARGS][1:]
-                print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
-            elif msg[COM] == Command.HEARTBEAT:
-                # Someone is asking us to send a heartbeat
-                if msg[ARGS][0] == "R":
-                    self.heartbeat_request( int( msg[ARGS][0] ))
-                else: # S, someone is telling us their heartbeat
-                    # print ipaddr, port
-                    print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
-            elif msg[COM] == Command.KNOCK:
-                pass #TODO: Maybe try to pull some handshake logic out of acceptConn?
-            elif msg[COM] == Command.GET_IPS:
-                # requesting us to give the list
-                if msg[ ARGS ][ 0 ] == "R":
-                    self.sendConnIps( int( msg[ ARGS ][ 1 ]) )
-                # sending us a list
-                if msg[ ARGS ][ 0 ] == "S":
-                    ips = msg[ ARGS ][ 1: ]
-                    # NOTE: Might want to chance this, but for now auto-connect to those ips
-                    keys = self.outboundConns.keys()
-                    ipAddrs = [ key[0] for key in keys ]
-                    for ip in ips:
-                        if  ip not in ipAddrs:
-                            # NOTE: Might want to use a different port? and/or retry on failure?
-                            if self.connectToIp( ip, self.port ):
-                                print(f"Connection made to: {ip}:{self.port}")
-                            else:
-                                print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
+        for nick, ipAndPort in self.nicknames.items():
+            if ipAndPort[self.IN] == revInfo:
+                recvNick = nick
+        if recvNick == -1:
+            logging.error(" Peer Listenloop: couldn't resolve revNick")
+            return # continue
+    
+        logging.debug(f"Server read msg: {msg}")
+        if msg[COM] == Command.KILL_SERVER:
+            self.kill_peer()
+        elif msg[COM] == Command.KILL_NETWORK:
+            self.kill_network()
+        elif msg[COM] == Command.SEND_MSG:
+            nick = int( msg[ARGS][0] )
+            self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
+        elif msg[COM] == Command.RECV_MSG:
+            msgRecv = msg[ARGS][1:]
+            print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
+        elif msg[COM] == Command.HEARTBEAT:
+            # Someone is asking us to send a heartbeat
+            if msg[ARGS][0] == "R":
+                self.heartbeat_request( int( msg[ARGS][0] ))
+            else: # S, someone is telling us their heartbeat
+                # print ipaddr, port
+                print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
+        elif msg[COM] == Command.KNOCK:
+            pass #TODO: Maybe try to pull some handshake logic out of acceptConn?
+        elif msg[COM] == Command.GET_IPS:
+            # requesting us to give the list
+            if msg[ ARGS ][ 0 ] == "R":
+                self.sendConnIps( int( msg[ ARGS ][ 1 ]) )
+            # sending us a list
+            if msg[ ARGS ][ 0 ] == "S":
+                ips = msg[ ARGS ][ 1: ]
+                # NOTE: Might want to chance this, but for now auto-connect to those ips
+                keys = self.outboundConns.keys()
+                ipAddrs = [ key[0] for key in keys ]
+                for ip in ips:
+                    if  ip not in ipAddrs:
+                        # NOTE: Might want to use a different port? and/or retry on failure?
+                        if self.connectToIp( ip, self.port ):
+                            print(f"Connection made to: {ip}:{self.port}")
+                        else:
+                            print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
+        elif msg[COM] == Command.XCHNG_KEY:
+            uri = self.nicknames[ recvNick ][self.URI]
+            recvKey = msg[ARGS][0]
+            recvKeyObj = seclib.securityManager.deserializePubKey( recvKey.encode() )
+            # add the key if we don't have it on keyring
+            if not self.keyring.has(recvKeyObj ):
+                self.keyring.add( recvKeyObj, uri,  nodeType.PEER )
+            if msg[ARGS][1] == "R": # reply case, don't need to send our key
+                pass
+            else: # send case, we need to send back our key
+                keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
+                self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, "R") )
+                
+        elif msg[COM] == Command.SHUTDWN:
+            # peer shutdowm their socket peer with us, update our local dictionary to reflect that
+            revInfo = revSock.getsockname()
+            print(f"revInfo: {revInfo}")
+            recvNick = -1
+            for nick, ipAndPort in self.nicknames.items():
+                if ipAndPort[self.IN] == revInfo:
+                    recvNick = nick
+            if recvNick == -1:
+                logging.error( "SHUTDWN: Couldn't find peer nickname")
             else:
-                logging.debug("Peer default case reached:")
-                pprint.pprint(msg)
+                self.closeConn( recvNick, False )
+        else:
+            logging.debug("Peer default case reached:")
+            pprint.pprint(msg)
         
     def kill_peer(self) -> bool:
         logging.debug("peer shutting down")
@@ -405,9 +548,6 @@ class peer(netProc):
         # close all our sockets
         self.shutDown()
         return True
-        
-    def heartbeat_request(self, nickname) -> bool:
-        return self.sendMsg(nickname, messageHandler.encode_message(Command.HEARTBEAT, "S", self.ip, self.port) )
          
     def knock(self, ip_addr, port) -> bool:
         if self.connectToIp( ip_addr, port ):
@@ -430,21 +570,8 @@ class peer(netProc):
                 command, stdin=self.masterFd, stdout = subprocess.PIPE, 
                 stderr = subprocess.PIPE, text = True )
             return
-        
-        try:
-            # Allow socket re-use to get around linux wait state
-            # basically lets you spam run the script without changing the port numbers in Linux.
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind( ( netProc.getLanIp() , self.port ) )
-            # if port = 0, the OS picks one for us, and we find out what it is here.
-            self.port = netProc.getPort( self.socket )
-            self.ip = self.getIp( self.socket )
-            logging.debug(f"{self.name} socket up on: {self.ip}:{self.port}")
-            # OS should manage this queue, so its non-blocking to us.
-            self.socket.listen( 5 )
-        except:
-            logging.error( traceback.format_exc() )
-            exit(-1)
+
+        super().start()
         
         # don't do anything in an interactive function if this flag is on
         if self.test:
@@ -481,8 +608,7 @@ class messageHandler():
     def encode_message( command: Command, *args ) -> bytes:
         '''Turn a command and data into the encoded format [length of command + data]:[command][data1|data2]'''
         # Might need standard format for seperating arguments in the data field.
-        contents: str = str(command.value)
-  
+        contents: str = str(command.value) 
         for idx, arg in enumerate(args):
             contents += str( arg )
             if idx < len(args) - 1:

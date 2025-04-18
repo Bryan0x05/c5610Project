@@ -62,6 +62,25 @@ class shell(cmd.Cmd):
             return
         # Sends msg to local server to forward this message to the corresponding socket
         self.peer.knock( ipAddr, port)
+
+    def do_keyExchange(self, line: str):
+        '''Exchange public keys with a peer by nickname'''
+        try:
+            args = line.split()
+            sockNick = int(args[0])
+        except:
+            self.default(line)
+            return
+        
+        if self.peer.nicknameExists( sockNick ):
+            from libs.seclib import securityManager as secMan
+            serialKey : bytes = secMan.serializePubKey( self.peer.keypub )
+            if not self.peer.sendMsg( sockNick, self.msgHand.encode_message(self.com.XCHNG_KEY, serialKey.decode() ) ):
+                print(colorama.Fore.RED, f"ERR: Sending message to {sockNick} failed!" + colorama.Style.RESET_ALL)
+            else:
+                print(colorama.Fore.GREEN, "Message sent!" + colorama.Style.RESET_ALL)
+        else:
+            print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )  
     
     def do_sendMsg(self, line : str ):
         ''' <socketnickname: int> <msg: str>'''
