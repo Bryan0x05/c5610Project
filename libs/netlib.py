@@ -58,11 +58,10 @@ class threadPlus ( threading.Thread ):
         
 class netProc:
     '''Super class for the common networking functions between client and server'''
-    IN = 0
-    OUT = 1
-    ARGS = 1
+    # constants for accessing several dictionaries in a more readable fashion
+    IN = KEY = 0
+    OUT = ARGS = 1
     URI = 2
-    # URI: sever_ip(listening socket ip):port
     
     def __init__( self, port: int, name: str = "_"):
         self.keypub, self.prikey = seclib.securityManager.generatePKCKeys()
@@ -118,7 +117,18 @@ class netProc:
             # return loopback intf for our local machine
             # NOTE: This means we are unable to connect outside of our own machine
             return "127.0.0.1"
-        
+    
+    def resolveSockNickName( self, insock : socket.socket ):
+        ''' Finds the nickname mapping of a incoming socket'''
+        inSockNick = -1
+        inSockInfo = insock.getsockname()
+        for nick, ipAndPort in self.nicknames.items():
+            if ipAndPort[self.IN] == inSockInfo:
+                inSockNick = nick
+        if inSockNick == -1:
+            raise Exception(" RESOLVESOCKNICKNAME: couldn't resolve socket nickname for an incoming socket")
+        return inSockNick
+
     def start(self):
         self.up = True
         try:
@@ -169,7 +179,7 @@ class netProc:
             inSock.setblocking( False)
             msg = None
             while msg == None:
-                msg = netProc.readMsg( inSock )
+                msg = self.readMsg( inSock )
                 
             if msg is None:
                 logging.error( "AcceptConn: msg is none!")
@@ -218,7 +228,7 @@ class netProc:
             print( colorama.Fore.GREEN + "New peer detected, run \"listsockets\" for more info"
                   + colorama.Style.RESET_ALL )
             # reprint shell prompt to make it look clean
-            print( clilib.PROMPT, end="" ) 
+            print( clilib.PROMPT, end="", flush=True ) 
             return True
         except Exception:
             logging.error( traceback.format_exc )
@@ -288,8 +298,6 @@ class netProc:
         '''' Checks if corresponding nickname exists '''
         # this function exists since geSockByNickname needs to always
         # return a sock instead of  a sock or bool
-        
-        # 0 meaning to contact our local server
         if nickname in self.nicknames:
             return True
         return False
@@ -301,8 +309,7 @@ class netProc:
             conns.append( f"{idx}. {key} => {self.nicknames[key]}" )
         return conns        
     
-    @staticmethod
-    def readMsg( sock : socket.socket ) -> Union[Tuple[Command, List[str]], None]:
+    def readMsg( self, sock : socket.socket ) -> Union[Tuple[Command, List[str]], None]:
         ''' Read a socket message '''
         msg : bytes = bytes()
         incMsg : bytes = bytes()
@@ -317,16 +324,27 @@ class netProc:
             logging.error( traceback.format_exc() )
             
         if len(msg) > 0:
-            # logging.debug(f"Returning message: {msg}")
-            return messageHandler.decode_message( msg )
+            # if we have a keyring for it, then we have exchange keys with the sender and must decrypt it
+            try:
+                senderNick = self.resolveSockNickName(  sock )
+                senderURI = self.nicknames[senderNick][self.URI]
+                if self.keyring.has(senderURI):
+                    # the sender encrypts with our pub key, we must use our private key
+                    msg = seclib.securityManager.decrypt( self.prikey, msg )
+            except Exception: #
+                pass
+            finally:
+                return messageHandler.decode_message( msg )
         else:
             return None
+        
+        
     
     def checkForMsgs( self ):
         ''' Check for a message from all our sockets, returning the first one found'''
         # unitTests seem to getting stuck in the floor when self.connections is empty
         for _, sock in self.inboundConns.items():
-            msg = netProc.readMsg( sock )
+            msg = self.readMsg( sock )
             if msg is not None:
                 return (msg, sock)
         return None
@@ -341,10 +359,10 @@ class netProc:
         ''' Send a message through a socket corresponding to the nickname '''
         if self.nicknameExists( nickname ):
             try:
-                # if we have a key for it
-                self.nicknames[nickname][self.URI]
-                # TODO: add local decryption and encryption for send adn read msg if valid keyring entry
-                # if self.keyring.has( )
+                receiverURI = self.nicknames[nickname][self.URI]
+                # Encrypt if we have a key for it
+                if self.keyring.has( receiverURI ):
+                    msg = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], msg )
                 self.getSockByNickname(nickname).sendall( msg )
                 return True
             except Exception:
@@ -383,35 +401,28 @@ class CA(netProc):
         msg = msg[0]
         if msg is None:
             return False # effectively continue
-        revNick = -1
         if msg[COM] == Command.CHECK_KEY or msg[COM] == Command.REG_KEY: # TODO: make look good
 
             logging.debug(f"CA read: {msg} from {revSock}")
             key = seclib.securityManager.decrypt( self.prikey, (msg[ARGS][0]).encode() )
             keyObj = seclib.securityManager.deserializePubKey( key )
-            revInfo = revSock.getsockname()
-            print(f"revInfo: {revInfo}")
 
-            for nick, ipAndPort in self.nicknames.items():
-                if ipAndPort[self.IN] == revInfo:
-                    revNick = nick
-            if revNick == -1:
-                logging.error("CA, couldn't resolve nickname to reply to socket")
-                return False # continue
+            recvNick = self.resolveSockNickName( revSock )
+            
             if msg[COM] == Command.CHECK_KEY:
                 uri =  msg[ARGS][1]
                 if self.keyring.has( uri ):
-                    self.sendMsg( revNick, messageHandler.encode_message(Command.CHECK_KEY, key.decode(), "T", self.keyring[uri][0] ) )
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, key.decode(), "T", self.keyring[uri][0] ) )
                 else:
-                    self.sendMsg( revNick, messageHandler.encode_message(Command.CHECK_KEY, key.decode(), "F" ) )
-                self.closeConn( revNick, True )
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, key.decode(), "F" ) )
+                self.closeConn( recvNick, True )
             elif msg[COM] == Command.REG_KEY:
                 # Register key with the URI of the sender, so they can't easily pretend to be another URI
-                if self.keyring.add( self.nicknames[revNick][self.URI], keyObj, nodeType.PEER ):
-                    self.sendMsg( revNick, messageHandler.encode_message(Command.REG_KEY, "T" ) )
+                if self.keyring.add( self.nicknames[recvNick][self.URI], keyObj, nodeType.PEER ):
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.REG_KEY, "T" ) )
                 else:
-                    self.sendMsg( revNick, messageHandler.encode_message(Command.REG_KEY, "F" ) )
-                    self.closeConn( revNick, True )
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.REG_KEY, "F" ) )
+                    self.closeConn( recvNick, True )
         elif msg[COM] == Command.HEARTBEAT:
             # Someone is asking us to send a heartbeat
             if msg[ARGS][0] == "R":
@@ -470,18 +481,10 @@ class peer(netProc):
         if readMsg is None:
             return # continune
         revSock = readMsg[1]
-        revInfo = revSock.getsockname()
+        recvNick = self.resolveSockNickName( revSock )
         msg: Tuple[Command, List[str]] = readMsg[0]
-        recvNick = -1
-        
-        for nick, ipAndPort in self.nicknames.items():
-            if ipAndPort[self.IN] == revInfo:
-                recvNick = nick
-        if recvNick == -1:
-            logging.error(" Peer Listenloop: couldn't resolve revNick")
-            return # continue
-    
         logging.debug(f"Server read msg: {msg}")
+        
         if msg[COM] == Command.KILL_SERVER:
             self.kill_peer()
         elif msg[COM] == Command.KILL_NETWORK:

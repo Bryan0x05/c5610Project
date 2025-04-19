@@ -22,9 +22,12 @@ class TestCases( unittest.TestCase ):
 
     def test_connection( self ):
         '''Testing Connection setup and deconstruction'''
-        
+        # step 1 of 3-way handshake, reach out and give our info
         self.peer1.connectToIp( self.peer2.ip, self.peer2.port )
+        # step 2 of 3-way handshake, accept incoming and reply with our informaton on a new socket
         self.peer2.acceptConn()
+        # step 3 of 3-way handshake, accept peer2's outboud socket to us.
+        self.peer1.acceptConn()
         peer1Msg = "hello peer 2"
         self.peer1.sendMsg(1, messageHandler.encode_message(Command.SEND_MSG, peer1Msg) )
         time.sleep(1)

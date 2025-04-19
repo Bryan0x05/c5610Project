@@ -4,6 +4,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 import logging
 
 if typing.TYPE_CHECKING:
@@ -15,8 +16,6 @@ class keyRing():
     '''Key ring for public key infrastructure'''
 
     def __init__(self):
-        # TODO: URI might be a tuple instead of a str
-        # TODO: Might want timestamp for expiration?
         # { uri : ( pub_key , nodeType(?) ) }
         self.keys: typing.Dict[  str, typing.Tuple[ rsa.RSAPublicKey, "netlib.nodeType" ] ] = dict()
     
@@ -73,13 +72,14 @@ class securityManager():
         return USERPATH.format(user=user)
     
     @staticmethod
-    def generatePKCKeys() -> tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]: # type:ignore
+    def generatePKCKeys() -> typing.Tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]: # type:ignore
         ''' Generate public and private key pair'''
-        priKey = rsa.generate_private_key( # type:ignore
-            public_exponent=65537,         # type:ignore
-            key_size=2048,                 # type:ignore
+        priKey = rsa.generate_private_key( 
+            public_exponent=65537,         
+            key_size=2048,
+            backend=default_backend() # this will error out otherwise despite function header stating its an optional arg
         )
-        return priKey.public_key(),priKey  # type:ignore
+        return priKey.public_key(), priKey  # type:ignore
     
     @staticmethod
     def encrypt( key : rsa.RSAPublicKey, plaintext: bytes ):
