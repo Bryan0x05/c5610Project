@@ -1,17 +1,20 @@
-name: Run pyright
+name: Main workflow
 on:
   push:
-    branches:
-      - main  # Runs on push to main branch
+
   pull_request:
-    branches:
-      - main  # Runs on PRs targeting main branch
+
 jobs:
-  type-check:
-    runs-on: ubuntu-latest
+  test:
+    runs-on: ubuntu-22.04
     steps:
       - name: checkout  repository
         uses: actions/checkout@v4
+
+      - name: Set up Python 3.8.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8.10'
 
       - name: Configure Py env
         run: |
@@ -26,3 +29,8 @@ jobs:
         uses: jakebailey/pyright-action@v2.3.2
         with:
            warnings: true
+
+      - name: Run tests
+        run: |
+           python -m unittest *_test.py
+           
