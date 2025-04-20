@@ -16,7 +16,7 @@ class keyRing():
     '''Key ring for public key infrastructure'''
 
     def __init__(self):
-        # { uri : ( pub_key , nodeType(?) ) }
+        # * { uri : ( pub_key , nodeType ) }
         self.keys: typing.Dict[  str, typing.Tuple[ rsa.RSAPublicKey, "netlib.nodeType" ] ] = dict()
     
     def has( self, uri : str ) -> bool:
@@ -37,7 +37,7 @@ class keyRing():
         if self.has(uri):
             self.keys.pop( uri )
             return True
-        logging.warning("ERR: dele, Tried deleting a non-existent uri")
+        logging.warning("WARN: delete, Tried deleting a non-existent uri")
         return False
     
     def __getitem__(self, uri :  str):
@@ -77,7 +77,7 @@ class securityManager():
         priKey = rsa.generate_private_key( 
             public_exponent=65537,         
             key_size=2048,
-            backend=default_backend() # this will error out otherwise despite function header stating its an optional arg
+            backend=default_backend() # ! Generates errors if the optional ("optional") backend is not set.
         )
         return priKey.public_key(), priKey  # type:ignore
     
@@ -105,7 +105,7 @@ class securityManager():
         keypub = serialization.load_der_public_key(
             key
         )
-        # TODO: fix later
+        # load_der... can return a key of any type based on the data. So we santiy check here.
         if isinstance( keypub, rsa.RSAPublicKey):
             return keypub
         raise Exception("SecurityManager failed to deserialize key")

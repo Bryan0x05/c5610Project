@@ -39,7 +39,7 @@ class nodeType(Enum):
     CA = 1
 
 logging.basicConfig(level=logging.DEBUG)
-# NOTE / TODO: Known issue, threadplus doesn't like arguments. WIP.
+# TODO: Known issue, threadplus doesn't like arguments. WIP.
 class threadPlus ( threading.Thread ):
     ''' Thread wrapper to externally killed in a safe manner'''
     def __init__(self, *args, **kwargs) -> None:
@@ -74,7 +74,7 @@ class netProc:
         self.inboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = dict()
         # keyed by int, with a 2-tuple of 2tuples each holding str,int pair
         self.nicknames: typing.Dict[ int, Tuple[ Tuple[str, int], Tuple[str, int], str ] ] = dict()
-        self.uris: typing.Dict[ Tuple [ str, int ], nodeType ] = dict() #TODO implement
+        self.uris: typing.Dict[ Tuple [ str, int ], nodeType ] = dict()
         # ipv4, TCP
         self.socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
         self.socket.setblocking(False)
@@ -103,7 +103,7 @@ class netProc:
     @staticmethod
     def getLanIp() -> str:
         try:
-            # sacrificial socket to find the lan ip without usual requirements
+            # sacrificial socket to find the lan ip
             s = socket.socket( socket.AF_INET, socket.SOCK_DGRAM)
             # connect to google DNS on HTTP port
             s.connect( ("8.8.8.8", 80) )
@@ -115,7 +115,7 @@ class netProc:
             logging.warning("Err, unable to resolve lan ip!")
             logging.error( traceback.format_exc )
             # return loopback intf for our local machine
-            # NOTE: This means we are unable to connect outside of our own machine
+            # ! This addr means we can't connect to processes outside our own
             return "127.0.0.1"
     
     def resolveSockNickName( self, insock : socket.socket ):
@@ -452,6 +452,7 @@ class peer(netProc):
         self.subProc = subProc
         self.test = test
         self.debug = debug
+        self.cert : bytes = bytes()
         ( logging.getLogger() ).disabled = not debug
 
     def runLoop( self ):
@@ -521,19 +522,42 @@ class peer(netProc):
                             print(f"Connection made to: {ip}:{self.port}")
                         else:
                             print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
+        elif msg[COM] == Command.CHECK_KEY:
+            ''' Reply from CA after asking to validate the provided cert for a peer's pub key'''
+            if (msg[ARGS][0]) == "T":
+                pass # good nothing needs to happen
+            else:
+                pass # TODO: Logic to deal with a bad ( likely just re-request the key / cert, this is really just to show we can catch this )
+            # TODO: CLI logic for user to request this.
+            pass
+        elif msg[COM] == Command.REG_KEY:
+            ''' Reply from CA after registering our key'''
+            # TODO: CLI logic for user to request this.
+            if (msg[ARGS][0]) == "T":
+                self.cert = (msg[ARGS][1]).encode()
+            else:
+                print(colorama.Fore.RED+"ERR: CA was unable to register our key!"+colorama.Style.RESET_ALL)
         elif msg[COM] == Command.XCHNG_KEY:
+            ''' Exchange pub keys with a peer '''
+            # TODO: Trade CA certs ( or don't if we don't have one yet)
             uri = self.nicknames[ recvNick ][self.URI]
             recvKey = msg[ARGS][0]
             recvKeyObj = seclib.securityManager.deserializePubKey( recvKey.encode() )
             # add the key if we don't have it on keyring
             if not self.keyring.has( uri ):
+                # validate cert if any
+                if len(msg[ARGS]) == 3:
+                    incCert = msg[ARGS][2]
+                    # TODO: ask CA, likely move this into its own function as well ( this whole case )
                 self.keyring.add( uri, recvKeyObj,  nodeType.PEER )
             if msg[ARGS][1] == "R": # reply case, don't need to send our key
                 pass
             else: # send case, we need to send back our key
                 keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
-                self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, "R") )
-                
+                if len( self.cert ) > 0:
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, "R", self.cert ) )
+                else:
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, "R") )
         elif msg[COM] == Command.SHUTDWN:
             # peer shutdowm their socket peer with us, update our local dictionary to reflect that
             revInfo = revSock.getsockname()
