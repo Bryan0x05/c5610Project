@@ -111,6 +111,23 @@ class shell(cmd.Cmd):
         else:
             print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )  
     
+    def do_exchangeKeys( self, line : str ):
+        ''' Exchange keys, and encrypt further messages with <target peer>'''
+        try:
+            args = line.split()
+            sockNick = int(args[0])
+        except:
+            self.default( line )
+            return
+        
+        if self.peer.nicknameExists( sockNick ):
+            if self.peer.xchng_key( sockNick ):
+                print(colorama.Fore.RED, f"ERR: Sending message to {sockNick} failed!" + colorama.Style.RESET_ALL)
+            else:
+                print(colorama.Fore.GREEN, "Message sent!" + colorama.Style.RESET_ALL)
+        else:
+            print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
+        
     def do_setPwd(self, _):
         ''' setPwd <none>, follow the prompts on screen to configure usr and pwd'''
         self.user = user = input( colorama.Fore.GREEN + "Set user name: " + colorama.Style.RESET_ALL )

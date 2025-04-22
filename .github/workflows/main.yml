@@ -10,20 +10,23 @@ jobs:
     steps:
       - name: checkout  repository
         uses: actions/checkout@v4
+      
+      - name: setup pyenv
+        uses: "gabrielfalcao/pyenv-action@v18"
+        with: 
+          versions: 3.8.10
+          command: |
+            pip install -U pip setuptools
+            pip install -r development.txt
 
-      - name: Set up Python 3.8.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.8.10'
-
-      - name: Configure Py env
-        run: |
-           python -m venv .venv
-           . .venv/bin/activate
-           pip install -r requirements.txt
+      - name: Create venu for 3.8.10
+        run: pyenv local 3.8.10 && python3 -mvenv .venv3810
            
       - name: Add virtual environ to PATH
-        run: echo "$PWD/.venv/bin" >> $GITHUB_PATH
+        run: echo "$PWD/.venv3810/bin" >> $GITHUB_PATH
+
+      - name: Add project requirements
+        run: pip install -r requirements.txt
 
       - name: Run Pyright 
         uses: jakebailey/pyright-action@v2.3.2

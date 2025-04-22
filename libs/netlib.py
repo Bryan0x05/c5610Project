@@ -11,6 +11,7 @@ import os
 import subprocess
 import pty
 import colorama
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 import libs.clilib  as clilib
 import libs.seclib as seclib
 # import curses # linux based module for terminal formatting
@@ -59,7 +60,7 @@ class threadPlus ( threading.Thread ):
 class netProc:
     '''Super class for the common networking functions between client and server'''
     # constants for accessing several dictionaries in a more readable fashion
-    IN = KEY = 0
+    COM = IN = KEY = 0
     OUT = ARGS = 1
     URI = 2
     
@@ -115,7 +116,7 @@ class netProc:
             logging.warning("Err, unable to resolve lan ip!")
             logging.error( traceback.format_exc )
             # return loopback intf for our local machine
-            # ! This addr means we can't connect to processes outside our own
+            # ! This addr means we can't connect to processes outside our own machine
             return "127.0.0.1"
     
     def resolveSockNickName( self, insock : socket.socket ):
@@ -331,14 +332,12 @@ class netProc:
                 if self.keyring.has(senderURI):
                     # the sender encrypts with our pub key, we must use our private key
                     msg = seclib.securityManager.decrypt( self.prikey, msg )
-            except Exception: #
+            except Exception:
                 pass
             finally:
                 return messageHandler.decode_message( msg )
         else:
             return None
-        
-        
     
     def checkForMsgs( self ):
         ''' Check for a message from all our sockets, returning the first one found'''
@@ -538,26 +537,7 @@ class peer(netProc):
             else:
                 print(colorama.Fore.RED+"ERR: CA was unable to register our key!"+colorama.Style.RESET_ALL)
         elif msg[COM] == Command.XCHNG_KEY:
-            ''' Exchange pub keys with a peer '''
-            # TODO: Trade CA certs ( or don't if we don't have one yet)
-            uri = self.nicknames[ recvNick ][self.URI]
-            recvKey = msg[ARGS][0]
-            recvKeyObj = seclib.securityManager.deserializePubKey( recvKey.encode() )
-            # add the key if we don't have it on keyring
-            if not self.keyring.has( uri ):
-                # validate cert if any
-                if len(msg[ARGS]) == 3:
-                    incCert = msg[ARGS][2]
-                    # TODO: ask CA, likely move this into its own function as well ( this whole case )
-                self.keyring.add( uri, recvKeyObj,  nodeType.PEER )
-            if msg[ARGS][1] == "R": # reply case, don't need to send our key
-                pass
-            else: # send case, we need to send back our key
-                keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
-                if len( self.cert ) > 0:
-                    self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, "R", self.cert ) )
-                else:
-                    self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, "R") )
+            self.xchng_key( recvNick, msg)
         elif msg[COM] == Command.SHUTDWN:
             # peer shutdowm their socket peer with us, update our local dictionary to reflect that
             revInfo = revSock.getsockname()
@@ -574,6 +554,31 @@ class peer(netProc):
             logging.debug("Peer default case reached:")
             pprint.pprint(msg)
         
+    def xchng_key(self, recvNick : int, msg : Union[Tuple[Command, List[str]], None] = None) -> bool:
+        ''' Exchange keys with another peer'''
+        # if we are starting the xchange:
+        if msg == None:
+            uri = self.nicknames[ recvNick ][self.URI]
+            # convert our key object to bytes, then decode into str to be compadiable with message handler
+            keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
+            self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert, "R" ) )
+        else: # we are receiving an incoming xchng 
+            recvKey = msg[ARGS][0]
+            recvCert = msg[ARGS][1]
+            replyFlag = msg[ARGS][2] # R= requesting reply, S = Sending ( i.e. don't reply)
+            uri = self.nicknames[ recvNick ][self.URI]
+            recvKeyObj: RSAPublicKey = seclib.securityManager.deserializePubKey( recvKey.encode() )
+            if not self.keyring.has( uri ):
+                # TODO: validate certs before adding
+                # ?: CA / anti-CA logic if the request has come from that peer type(?)
+                self.keyring.add( uri, recvKeyObj, nodeType.PEER )
+
+            if replyFlag == "R":
+                keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
+                self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert, "S" ) )
+        
+        return True
+    
     def kill_peer(self) -> bool:
         logging.debug("peer shutting down")
         # closes all server sockets on the way out

@@ -82,46 +82,52 @@ class securityManager():
         return priKey.public_key(), priKey  # type:ignore
     
     @staticmethod
-    def encrypt( key : rsa.RSAPublicKey, plaintext: bytes ):
+    def encrypt( key : rsa.RSAPublicKey, plaintext: bytes) -> bytes:
         '''Encrypt data using the provided key, returns ciphertext'''
         # padding here means adding randomness
-        cipherText =  key.encrypt( plaintext, padding.OAEP(
+        cipherTextBytes =  key.encrypt( plaintext, padding.OAEP(
             mgf=padding.MGF1( algorithm= hashes.SHA256()), # mask generation
             algorithm=hashes.SHA256(), # main hash func
             label=None
         ))
-        return cipherText
+        # TODO: Wrap in a custom exeception that can be caught in netlib, and user informed
+        if cipherTextBytes == None: raise BaseException("Encrpyt message failed")
+        return bytes(cipherTextBytes)
     
     @staticmethod
-    def serializePubKey( key : rsa.RSAPublicKey ):
+    def serializePubKey( key : rsa.RSAPublicKey ) -> bytes:
         keyBytes = key.public_bytes(
             encoding=serialization.Encoding.DER,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-        return keyBytes
+        if keyBytes == None: raise Exception("SerializePubKey failed")
+        return bytes(keyBytes)
 
     @staticmethod
     def deserializePubKey( key : bytes ) ->  rsa.RSAPublicKey:
         keypub = serialization.load_der_public_key(
-            key
+            key,
+            backend=default_backend()
         )
         # load_der... can return a key of any type based on the data. So we santiy check here.
         if isinstance( keypub, rsa.RSAPublicKey):
             return keypub
+        # TODO: Wrap custom error that can be caught, and user informed?
         raise Exception("SecurityManager failed to deserialize key")
     
     @staticmethod
-    def decrypt( key : rsa.RSAPrivateKey, ciphertext: bytes ):
+    def decrypt( key : rsa.RSAPrivateKey, ciphertext: bytes ) -> bytes:
         '''Converts cipher text to plaintext'''
-        plaintext = key.decrypt(
+        plaintextBytes = key.decrypt(
         ciphertext,
         padding.OAEP(
             mgf=padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(),
             label=None
         ))
-        return plaintext
-
+        # TODO: Wrap a custom arrow that can be caught by read message to inform the user
+        if plaintextBytes == None: raise Exception("decryptig message... failed!")
+        return bytes(plaintextBytes)
 
 if __name__ == "__main__":
     pass
