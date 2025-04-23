@@ -14,12 +14,9 @@ jobs:
       - name: setup pyenv
         uses: "gabrielfalcao/pyenv-action@v18"
         with: 
-          versions: 3.8.10
-          command: |
-            pip install -U pip setuptools
-            pip install -r development.txt
+          default: 3.8.10
 
-      - name: Create venu for 3.8.10
+      - name: Create venv for 3.8.10
         run: pyenv local 3.8.10 && python3 -mvenv .venv3810
            
       - name: Add virtual environ to PATH
