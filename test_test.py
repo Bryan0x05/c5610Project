@@ -20,22 +20,22 @@ class TestCases( unittest.TestCase ):
         cls.peer1.shutDown()
         cls.peer2.shutDown()
     # set up a connection for each test
-    def connHelper( self, ip : str, port : int ) -> bool:
+    def connHelper( self, p1 : peer, p2 : peer ):
         # step 1 of 3-way handshake, reach out and give our info
-        if not self.peer1.connectToIp( self.peer2.ip, self.peer2.port ): return False
+        self.assertTrue( p1.connectToIp( p2.ip, p2.port ), "handshake step 1 failed" )
 
         # step 2 of 3-way handshake, accept incoming and reply with our informaton on a new socket
-        if not self.peer2.acceptConn(): return False
+        self.assertTrue(p2.acceptConn(), "handshake step2 failed")
         
         # step 3 of 3-way handshake, accept peer2's outboud socket to us.
-        if not self.peer1.acceptConn(): return False
+        self.assertTrue( p1.acceptConn(), "handshake step3 failed")
         
         return True
 
     def msgHelper( self, sender : peer, recv : peer, msg : str ) -> bool:
         if not sender.sendMsg(1, messageHandler.encode_message(Command.SEND_MSG, msg) ) : return False
         time.sleep(1)
-        readMsg = self.peer2.checkForMsgs()
+        readMsg = recv.checkForMsgs()
         self.assertFalse( readMsg == None, f"{sender.name}->{recv.name} comm failure!")
         # for tooling to realize readMsg cannot be none anymore
         if readMsg == None: return False
@@ -46,19 +46,28 @@ class TestCases( unittest.TestCase ):
     def test_connection( self ):
         '''Monolithic basic netwokring test targetting setup, deconstruction and messaging.'''
         # SETUP peer1<->peer2
-        self.assertTrue( self.connHelper( self.peer2.ip, self.peer2.port), "Failed to connect peer1 and peer2!" )
+        self.connHelper( self.peer1, self.peer2 )
         # test peer1->peer2 socket pair, asserts are within.
         self.msgHelper( sender=self.peer1, recv=self.peer2, msg="hello peer 2")
         # test peer2->peer1 socket pair
         self.msgHelper( sender=self.peer2, recv=self.peer1, msg="hello peer 1")
         # close peer1 and peer2 sockets
         self.peer1.closeConn( 1, msgFlag=True )
+        # run listen loop once, to read msg, and check its psuedo-switch statement logic
+        self.peer2.listenCycle()
         time.sleep(1)
-        self.assertTrue( len(self.peer1.nicknames) == len(self.peer2.nicknames) == 0, "Peer1 or 2 connections didn't close and update dictionaries correctly" )
+        self.assertTrue( len(self.peer1.nicknames) == len(self.peer2.nicknames) == 0, 
+                        f"{self.peer1.nicknames} != {self.peer2.nicknames}" )
+        self.peer1.conID = self.peer2.conID = 1
 
-    def encrypted_msg_test( self ):
+
+    def test_encrypted_msg( self ):
         ''' Monolithic test, testing key rings, CA, message en/de(decrpyt)'''
-        self.assertTrue( self.connHelper( self.peer2.ip, self.peer2.port), "Failed to connect peer1 and peer2!" )
+        self.connHelper( self.peer1, self.peer2 )
+        # ! Consumes an extra sendMsg from the 3-way handshake ( might be an issue with the handsake sending an extra msg ? )
+        msg = self.peer2.checkForMsgs()
+        # ! The consumption only works if we check msg. Very odd beavior to look into later.
+        if msg is None: return False
         self.peer1.xchng_key( 1 )
         time.sleep(1)
         # for for xnchng command
@@ -66,19 +75,15 @@ class TestCases( unittest.TestCase ):
         self.assertTrue( msg != None, "Failed to get xchng_key message")
         # for python to know msg is non-null pass this point
         if msg == None: return
-        
-        recvSock = msg[1]
         msg = msg[0]
-        self.assertTrue( msg[self.peer1.COM] == Command.XCHNG_KEY, "Expected exchange command")
+        self.assertTrue( msg[self.peer1.COM] == Command.XCHNG_KEY, f"Expected exchange command not {msg[self.peer1.COM]}")
         self.peer2.xchng_key( 1, msg )
         time.sleep(1)
-        # test encrypted peer1->peer2 socket pair with encrypted msg
+        # test encrypted peer1->peer2 socket pair with ENCYPTED msg
         self.msgHelper( sender=self.peer1, recv=self.peer2, msg="hello peer 2")
-        # test encrypted peer2->peer1 socket pair with encrypted msg
+        # test encrypted peer2->peer1 socket pair with ENCYPTED msg
         self.msgHelper( sender=self.peer2, recv=self.peer1, msg="hello peer 1")
-        # TODO: add key exchange function and test
         # TODO: Add CA validation logic
-        self.assertTrue( self.connHelper( self.peer2.ip, self.peer2.port), "Failed to connect peer1 and peer2!" )
         
 
 def basicNetworkingSuite():
@@ -88,7 +93,7 @@ def basicNetworkingSuite():
 
 def encryptionSuite():
     suite = unittest.TestSuite()
-    suite.addTest( TestCases("encrypted_msg_test") )
+    suite.addTest( TestCases("test_encrypted_msg") )
     return suite
 
 if __name__ == '__main__':

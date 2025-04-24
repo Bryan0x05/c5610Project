@@ -14,6 +14,7 @@ import colorama
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 import libs.clilib  as clilib
 import libs.seclib as seclib
+import base64
 # import curses # linux based module for terminal formatting
 
 # argument seperator
@@ -30,7 +31,7 @@ class Command(Enum):
     KILL_SERVER = 5  # Node <-> Node: Kill the peer process
     KILL_NETWORK = 6 # Node <-> Node: Kill the entire network by sending the message to all other nodes
     GET_IPS = 7      # Node <-> Node: Give me all the ip addresses you are connected too.
-    SHUTDWN = 8      # Node <-> Node: Connected peer is shutting down.
+    SHUTDWN_CON = 8      # Node <-> Node: Connected peer is shutting down.
     CHECK_KEY = 9    # Node <-> CA: Validate this public key
     REG_KEY  = 10    # Node <-> CA: Register this key with the CA
     XCHNG_KEY  = 11  # Node <-> Node: Exchange public keys.
@@ -243,7 +244,7 @@ class netProc:
         # If this function isn't invoked as a response of receiving one.
         if msgFlag:
             self.sendMsg( nickname, messageHandler.encode_message(
-                Command.SHUTDWN,
+                Command.SHUTDWN_CON,
             ))
         outSock.close()
         inSock.close()
@@ -391,7 +392,7 @@ class CA(netProc):
         self.name = name
         super().start()
             
-    def listenLoop( self ):
+    def listenCycle( self ):
         self.acceptConn()
         msg = self.checkForMsgs()
         if msg is None:
@@ -440,7 +441,7 @@ class CA(netProc):
     def start( self ):
         self.stop = False
         while not self.stop:
-            self.stop = self.listenLoop()
+            self.stop = self.listenCycle()
 
 class peer(netProc):
     def __init__(self, port: int = 0, name: str = "_", subProc = False, debug = False, test = False ):
@@ -460,7 +461,7 @@ class peer(netProc):
         sh = clilib.shell( peer=self)
         self.cmdThread = threadPlus( target = sh.cmdloop, name = "cmdThread" )
         # listen for msgs and replies
-        self.listenThread = threadPlus( target = self.listenLoop, name = "listenThread" )
+        self.listenThread = threadPlus( target = self.listenCycle, name = "listenThread" )
 
         self.listenThread.start()
         self.cmdThread.start()
@@ -471,7 +472,7 @@ class peer(netProc):
         self.up = False
         self.shutDown()
 
-    def listenLoop( self ):
+    def listenCycle( self ):
         ''' Do all the server/client things '''
         
         # see if there are any new connections
@@ -538,21 +539,16 @@ class peer(netProc):
                 print(colorama.Fore.RED+"ERR: CA was unable to register our key!"+colorama.Style.RESET_ALL)
         elif msg[COM] == Command.XCHNG_KEY:
             self.xchng_key( recvNick, msg)
-        elif msg[COM] == Command.SHUTDWN:
-            # peer shutdowm their socket peer with us, update our local dictionary to reflect that
-            revInfo = revSock.getsockname()
-            print(f"revInfo: {revInfo}")
-            recvNick = -1
-            for nick, ipAndPort in self.nicknames.items():
-                if ipAndPort[self.IN] == revInfo:
-                    recvNick = nick
-            if recvNick == -1:
-                logging.error( "SHUTDWN: Couldn't find peer nickname")
-            else:
-                self.closeConn( recvNick, False )
+        elif msg[COM] == Command.SHUTDWN_CON:
+            self.shutdwn_con( recvNick )
         else:
             logging.debug("Peer default case reached:")
             pprint.pprint(msg)
+    
+    def shutdwn_con( self, recvNick : int ) -> bool:
+            # peer shutdowm their socket peer with us, update our local dictionary to reflect that
+                self.closeConn( recvNick, False )
+                return True
         
     def xchng_key(self, recvNick : int, msg : Union[Tuple[Command, List[str]], None] = None) -> bool:
         ''' Exchange keys with another peer'''
@@ -560,7 +556,7 @@ class peer(netProc):
         if msg == None:
             uri = self.nicknames[ recvNick ][self.URI]
             # convert our key object to bytes, then decode into str to be compadiable with message handler
-            keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
+            keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.keypub ) ).decode()
             self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert, "R" ) )
         else: # we are receiving an incoming xchng 
             recvKey = msg[ARGS][0]
