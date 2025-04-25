@@ -497,7 +497,16 @@ class peer(netProc):
             self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
         elif msg[COM] == Command.RECV_MSG:
             msgRecv = msg[ARGS][1:]
-            print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
+            if self.cert == bytes(0):
+                print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
+            else:
+                uri = self.nicknames[recvNick][self.URI]
+                if self.keyring.has( uri ) and self.keyring[uri][2] == True:
+                    print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
+                else:
+                    # if no certf available
+                    print(colorama.Fore.MAGENTA,f"From: {msg[ARGS][0]}(uncertified), msg: {msgRecv}" + colorama.Style.RESET_ALL )
+
         elif msg[COM] == Command.HEARTBEAT:
             # Someone is asking us to send a heartbeat
             if msg[ARGS][0] == "R":
@@ -531,7 +540,6 @@ class peer(netProc):
         elif msg[COM] == Command.REG_KEY:
             ''' Reply from CA after registering our key'''
             self.reg_key_listen( msg )
-
         elif msg[COM] == Command.XCHNG_KEY:
             self.xchng_key( recvNick, msg)
         elif msg[COM] == Command.SHUTDWN_CON:
@@ -604,8 +612,7 @@ class peer(netProc):
         except:
             print(colorama.Fore.RED+"ERR: CA was unable to register our key!"+colorama.Style.RESET_ALL)
         return False
-            
-    
+                
     def xchng_key(self, recvNick : int, msg : Union[Tuple[Command, List[str]], None] = None) -> bool:
         ''' Exchange keys with another peer'''
         # if we are starting the xchange:

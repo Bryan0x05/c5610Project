@@ -119,7 +119,7 @@ class shell(cmd.Cmd):
         except:
             self.default( line )
             return
-        
+        # TODO: look into this and confirm logic is correct
         if self.peer.nicknameExists( sockNick ):
             if self.peer.xchng_key( sockNick ):
                 print(colorama.Fore.RED, f"ERR: Sending message to {sockNick} failed!" + colorama.Style.RESET_ALL)
