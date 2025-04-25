@@ -68,6 +68,7 @@ class netProc:
     def __init__( self, port: int, name: str = "_"):
         self.keypub, self.prikey = seclib.securityManager.generatePKCKeys()
         self.keyring = seclib.keyRing()
+        self.compressKey = seclib.securityManager.generateCompressionKey()
         self.port = port
         # 0 means the client/server socket in our node
         self.conID = 1
@@ -180,6 +181,7 @@ class netProc:
             logging.debug(f"Accept connection from: {peerAddrAndPort}, on socket: {inSock.getsockname()}")
             inSock.setblocking( False)
             msg = None
+            self.nicknames[ self.conID ] = (  inSock.getsockname() ,tuple(), "_" , nodeType.PEER )
             while msg == None:
                 msg = self.readMsg( inSock )
                 
@@ -189,8 +191,6 @@ class netProc:
             elif msg[self.ARGS][0] != 'R' : # step 2 of handshake
                 print(f"acceptConn read: {msg}")
                 self.inboundConns[ inSock.getsockname() ]  = inSock
-                # partial dict update
-                self.nicknames[ self.conID ] = (  inSock.getsockname() ,tuple(), "_" , nodeType.PEER )
                 # conID and several dicts are updated in here
                 return self.handshakeMid( peerAddrAndPort, msg )
             elif msg[self.ARGS][0] == 'R': # step 3 of handshake ( creates duplex conn with 2 sockets )
@@ -220,7 +220,7 @@ class netProc:
             outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
             outSock.settimeout(5)
             outSock.connect( (replyIp, replyPort) )
-            outSock.sendall( messageHandler.encode_message( Command.KNOCK, 'R', replyId, self.type.value ) )
+
             # I believe this unsets timeout
             # This is fine, the rest of the code operates on a read-again error assumption
             # that non-blocking sockets provide
@@ -229,6 +229,8 @@ class netProc:
             self.outboundConns[ (ipAddr, port) ] = outSock
             self.nicknames [ self.conID ] = ( self.nicknames[self.conID][self.IN], (ipAddr, port), f"{replyIp}:{replyPort}", replyNodeType )
             self.conID += 1
+            
+            self.sendMsg( self.conID-1,messageHandler.encode_message( Command.KNOCK, 'R', replyId, self.type.value ) )
             print( colorama.Fore.GREEN + "New peer detected, run \"listsockets\" for more info"
                   + colorama.Style.RESET_ALL )
             # reprint shell prompt to make it look clean
@@ -267,14 +269,15 @@ class netProc:
                 logging.debug(f"Already connected to {targetIpAddr}:{targetPort}" )
             else:
                 outSock.connect( (targetIpAddr, targetPort) )
-                # step 1 of the handshake
-                outSock.sendall( messageHandler.encode_message(Command.KNOCK, self.conID, self.port, self.type.value ) )
                 # replace timeout with non-blocking
                 outSock.setblocking( False )
                 ipAddr, port = outSock.getsockname()
                 self.outboundConns[ (ipAddr, port) ] = outSock
                 self.nicknames[self.conID ] = ( tuple(), ( ipAddr, port ), f"{targetIpAddr}:{targetPort}", nodeType.PEER )
                 self.conID += 1
+                
+                # step 1 of the handshake
+                self.sendMsg( self.conID-1,  messageHandler.encode_message(Command.KNOCK, self.conID, self.port, self.type.value ))
                 logging.debug(f" Connected to {ipAddr}:{port}, connection nickname: {self.conID} ")
             return True
         # using Exception to exclude base exceptions like SystemExit or keyboardinterrupt
@@ -329,15 +332,22 @@ class netProc:
         if len(msg) > 0:
             # if we have a keyring for it, then we have exchange keys with the sender and must decrypt it
             try:
+                # decompress
+                protoHeader = msg.decode()
+                compressKey, isMsgEncrypted, msg = tuple([m.encode() for m in protoHeader.split(ASEP,2)])
+                logging.debug( f"read, compress bytes: {compressKey}")
+                logging.debug( f"read, msg bytes: {msg}")
+
+                msg = protoHeader.split(ASEP,2)[1].encode()
+                uncompressedMsg = seclib.securityManager.uncompress( compressKey, msg ).encode()
                 senderNick = self.resolveSockNickName(  sock )
                 senderURI = self.nicknames[senderNick][self.URI]
-                if self.keyring.has(senderURI):
+                if self.keyring.has(senderURI) and bool(isMsgEncrypted):
                     # the sender encrypts with our pub key, we must use our private key
-                    msg = seclib.securityManager.decrypt( self.prikey, msg )
+                    msg = seclib.securityManager.decrypt( self.prikey, uncompressedMsg )
+                return messageHandler.decode_message( uncompressedMsg )
             except Exception:
-                pass
-            finally:
-                return messageHandler.decode_message( msg )
+                logging.error( traceback.format_exc() )
         else:
             return None
     
@@ -356,14 +366,19 @@ class netProc:
         # S = sending, as in sending the info, R = requesting, requesting the info
         self.sendMsg( nickname, messageHandler.encode_message(Command.GET_IPS, "S", *peers) )
 
-    def sendMsg( self, nickname: int, msg : bytes ) -> bool:
+    def sendMsg( self, nickname: int, msg : bytes, doEncrypt : bool = True) -> bool:
         ''' Send a message through a socket corresponding to the nickname '''
+        isMsgEncrypted =  False
         if self.nicknameExists( nickname ):
             try:
+                msg = seclib.securityManager.compress( self.compressKey, msg)
                 receiverURI = self.nicknames[nickname][self.URI]
+                logging.debug( f"send, compress bytes: {self.compressKey}")
                 # Encrypt if we have a key for it
-                if self.keyring.has( receiverURI ):
+                if self.keyring.has( receiverURI ) and doEncrypt :
+                    isMsgEncrypted = True
                     msg = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], msg )
+                msg = f"{self.compressKey.decode()}{ASEP}{isMsgEncrypted}{ASEP}{msg.decode()}".encode()
                 self.getSockByNickname(nickname).sendall( msg )
                 return True
             except Exception:
@@ -391,7 +406,6 @@ class netProc:
 class CA(netProc):
     def __init__( self, port: int = 0, name: str = "_ " ):
         self.name = name
-        self.keypub, self.keypri = seclib.securityManager.generatePKCKeys()
         super().start()
             
     def listenCycle( self ):
@@ -409,7 +423,7 @@ class CA(netProc):
         if msg[COM] == Command.CHECK_KEY:
             uri =  msg[ARGS][1]
             clientCert = msg[ARGS][2]
-            if self.keyring.has( uri ) and ( seclib.securityManager.decrypt( self.keypri, clientCert.encode() ) == self.keyring[uri][0] ):
+            if self.keyring.has( uri ) and ( seclib.securityManager.decrypt( self.prikey, clientCert.encode() ) == self.keyring[uri][0] ):
                 keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.keypub ) ).decode()
                 self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, "T", uri, keyStr ) )
             else:
@@ -493,8 +507,9 @@ class peer(netProc):
         elif msg[COM] == Command.KILL_NETWORK:
             self.kill_network()
         elif msg[COM] == Command.SEND_MSG:
-            nick = int( msg[ARGS][0] )
-            self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
+            pass
+            # nick = int( msg[ARGS][0] )
+            # self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
         elif msg[COM] == Command.RECV_MSG:
             msgRecv = msg[ARGS][1:]
             if self.cert == bytes(0):
@@ -619,15 +634,16 @@ class peer(netProc):
         if msg == None:
             uri = self.nicknames[ recvNick ][self.URI]
             # convert our key object to bytes, then decode into str to be compadiable with message handler
-            keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.keypub ) ).decode()
-            self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert, "R" ) )
-        else: # we are receiving an incoming xchng 
+            keyStr = base64.b64encode(seclib.securityManager.serializePubKey( self.keypub )).decode()
+            print("water mark 1")
+            self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "R" ), False )
+            print("water mark 2")
+        else: # we are receiving an incoming xchng
             recvKey = msg[ARGS][0]
             recvCert = msg[ARGS][1]
             replyFlag = msg[ARGS][2] # R= requesting reply, S = Sending ( i.e. don't reply)
             uri = self.nicknames[ recvNick ][self.URI]
-            recvKeyObj: RSAPublicKey = seclib.securityManager.deserializePubKey( recvKey.encode() )
-            
+            recvKeyObj: RSAPublicKey = seclib.securityManager.deserializePubKey( base64.b64decode(recvKey) )
             if not self.keyring.has( uri ):
                 # TODO: validate certs before adding
                 # ?: CA / anti-CA logic if the request has come from that peer type(?)
@@ -635,7 +651,7 @@ class peer(netProc):
 
             if replyFlag == "R":
                 keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
-                self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert, "S" ) )
+                self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "S"), False )
         
         return True
     
@@ -711,9 +727,9 @@ class messageHandler():
     
     @staticmethod
     def encode_message( command: Command, *args ) -> bytes:
-        '''Turn a command and data into the encoded format [length of command + data]:[command][data1|data2]'''
+        '''Turn a command and data into the encoded format [length of command + data]:[command]|[data1|data2]'''
         # Might need standard format for seperating arguments in the data field.
-        contents: str = str(command.value) 
+        contents: str = str(command.value) + ASEP
         for idx, arg in enumerate(args):
             contents += str( arg )
             if idx < len(args) - 1:
@@ -723,14 +739,14 @@ class messageHandler():
     
     @staticmethod
     def decode_message( message: bytes) -> Tuple[Command, list]:
-        '''Turn the encoded format [length of command + data]:[command][data] into (command, data); Also checks the length'''
+        '''Turn the encoded format [length of command + data]:[command]|[data] into (command, data); Also checks the length'''
         m: str = message.decode()
         length: int = int(m.split(":", 1)[0])
         m = m.split(":", 1)[1]
         if len(m) != length:
             raise RuntimeError("Length of received message doesn't match expected length!")
-        comm = Command(int(m[0]))
-        args = m[1:].split(ASEP)
+        comm = Command(int(m.split(ASEP)[0]))
+        args = m.split(ASEP)[1:]
         return comm, args
 
 

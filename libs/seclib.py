@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
+from cryptography.fernet import Fernet
 import logging
 
 if typing.TYPE_CHECKING:
@@ -84,10 +85,26 @@ class securityManager():
         ''' Generate public and private key pair'''
         priKey = rsa.generate_private_key( 
             public_exponent=65537,         
-            key_size=2048,
+            key_size=4096,
             backend=default_backend() # ! Generates errors if the optional ("optional") backend is not set.
         )
         return priKey.public_key(), priKey  # type:ignore
+    
+    @staticmethod
+    def generateCompressionKey() -> bytes:
+        f =   Fernet.generate_key()
+        return f
+    
+    @staticmethod
+    def compress( key : bytes, data : bytes):
+        k = Fernet( key )
+        return k.encrypt( data )
+    
+    @staticmethod
+    def uncompress( key : bytes, data : bytes ) -> str:
+        k = Fernet( key )
+        plainByteText : bytes = k.decrypt( data )
+        return plainByteText.decode()
     
     @staticmethod
     def encrypt( key : rsa.RSAPublicKey, plaintext: bytes) -> bytes:
@@ -105,7 +122,7 @@ class securityManager():
     @staticmethod
     def serializePubKey( key : rsa.RSAPublicKey ) -> bytes:
         keyBytes = key.public_bytes(
-            encoding=serialization.Encoding.DER,
+            encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
         if keyBytes == None: raise Exception("SerializePubKey failed")
@@ -113,11 +130,10 @@ class securityManager():
 
     @staticmethod
     def deserializePubKey( key : bytes ) ->  rsa.RSAPublicKey:
-        keypub = serialization.load_der_public_key(
+        keypub = serialization.load_pem_public_key(
             key,
             backend=default_backend()
         )
-        # load_der... can return a key of any type based on the data. So we santiy check here.
         if isinstance( keypub, rsa.RSAPublicKey):
             return keypub
         # TODO: Wrap custom error that can be caught, and user informed?
