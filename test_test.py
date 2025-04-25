@@ -97,6 +97,6 @@ def encryptionSuite():
     return suite
 
 if __name__ == '__main__':
-    runner = unittest.TextTestRunner()
+    runner = unittest.TextTestRunner( verbosity=2 )
     runner.run( basicNetworkingSuite() )
     runner.run( encryptionSuite() )

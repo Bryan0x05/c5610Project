@@ -17,19 +17,19 @@ class keyRing():
 
     def __init__(self):
         # * { uri : ( pub_key , nodeType ) }
-        self.keys: typing.Dict[  str, typing.Tuple[ rsa.RSAPublicKey, "netlib.nodeType" ] ] = dict()
+        self.keys: typing.Dict[  str, typing.Tuple[ rsa.RSAPublicKey, "netlib.nodeType", bool ] ] = dict()
     
     def has( self, uri : str ) -> bool:
         if uri in self.keys.keys():
             return True
         return False
 
-    def add( self, uri : str, key :  rsa.RSAPublicKey, type : "netlib.nodeType" ):
+    def add( self, uri : str, key :  rsa.RSAPublicKey, type : "netlib.nodeType", cert : bool = False ):
         if self.has(uri) == True:
             logging.warning("ERR: add, adding a key that already exists")
             return False
         # assume  if we are adding a key, its status is true. 
-        self.keys[ uri ] = ( key, type )
+        self.keys[ uri ] = ( key, type, cert )
         return True
     
     def delete( self, uri : str ):
@@ -39,6 +39,14 @@ class keyRing():
             return True
         logging.warning("WARN: delete, Tried deleting a non-existent uri")
         return False
+    
+    def updateKey( self, uri : str, newCert : bool ):
+        try:
+            oldInfo = self.keys.pop( uri )
+            self.add( uri, oldInfo[0],  oldInfo[1], newCert )
+        except:
+            return False
+        return True
     
     def __getitem__(self, uri :  str):
         return self.keys[uri]

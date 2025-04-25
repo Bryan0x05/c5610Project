@@ -159,6 +159,13 @@ class shell(cmd.Cmd):
         except:
             self.default(line)
 
+    def do_regKey( self, line):
+        ''' Ask our CA(if existent) to certify our key and enable certify mode'''
+        try:
+            self.peer.reg_key()
+        except:
+            self.default(line)
+
     def spinAnimation(self):
         if self.spin == False:
             return
