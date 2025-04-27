@@ -30,7 +30,7 @@ class Command(Enum):
     HEARTBEAT = 4    # Node <-> Node: Heartbeat, I'm alive!
     KILL_SERVER = 5  # Node <-> Node: Kill the peer process
     KILL_NETWORK = 6 # Node <-> Node: Kill the entire network by sending the message to all other nodes
-    GET_IPS = 7      # Node <-> Node: Give me all the ip addresses you are connected too.
+    GET_URIS = 7      # Node <-> Node: Give me all the ip addresses you are connected too.
     SHUTDWN_CON = 8      # Node <-> Node: Connected peer is shutting down.
     CHECK_KEY = 9    # Node <-> CA: Validate this public key
     REG_KEY  = 10    # Node <-> CA: Register this key with the CA
@@ -401,11 +401,11 @@ class netProc:
                 return (msg, sock)
         return None
 
-    def sendConnIps( self, nickname: int ):
-        ''' Send a list of all ip addrs we are connected to'''
-        peers: list[str] = [ ip for ( ip, _ ) in self.outboundConns.keys() ]
+    def sendConnURIs( self, nickname: int ) -> bool:
+        ''' Send a list of all URIS of nodes we are connected to'''
+        peers: list[str] = [ entry[self.URI] for ( _, entry ) in self.nicknames.items() ]
         # S = sending, as in sending the info, R = requesting, requesting the info
-        self.sendMsg( nickname, messageHandler.encode_message(Command.GET_IPS, "S", *peers) )
+        return self.sendMsg( nickname, messageHandler.encode_message(Command.GET_URIS, "S", *peers) )
 
     def sendMsg( self, nickname: int, msg : bytes, doEncrypt : bool = True ) -> bool:
         ''' Send a message through a socket corresponding to the nickname '''
@@ -587,23 +587,13 @@ class peer(netProc):
                 print(f"Heart from { msg[ ARGS ][ 1 ] }:{ msg[ ARGS ][ 2 ]}")
         elif msg[COM] == Command.KNOCK:
             pass #TODO: Maybe try to pull some handshake logic out of acceptConn?
-        elif msg[COM] == Command.GET_IPS:
+        elif msg[COM] == Command.GET_URIS:
             # requesting us to give the list
             if msg[ ARGS ][ 0 ] == "R":
-                self.sendConnIps( int( msg[ ARGS ][ 1 ]) )
+                self.sendConnURIs( int( msg[ ARGS ][ 1 ]) )
             # sending us a list
             if msg[ ARGS ][ 0 ] == "S":
-                ips = msg[ ARGS ][ 1: ]
-                # NOTE: Might want to chance this, but for now auto-connect to those ips
-                keys = self.outboundConns.keys()
-                ipAddrs = [ key[0] for key in keys ]
-                for ip in ips:
-                    if  ip not in ipAddrs:
-                        # NOTE: Might want to use a different port? and/or retry on failure?
-                        if self.connectToIp( ip, self.port ):
-                            print(f"Connection made to: {ip}:{self.port}")
-                        else:
-                            print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
+                self.readURIsAndConect( msg )
         elif msg[COM] == Command.CHECK_KEY:
             self.check_key_listen( msg )
             # TODO: CLI logic for user to request this.
@@ -625,6 +615,25 @@ class peer(netProc):
             if nickVal[CAVAL] == nodeType.CA:
                 return nick
         raise Exception("CA nick not found!")
+    
+    def requestURIs(self, nickname) -> bool:
+        return self.sendMsg( nickname, messageHandler.encode_message(Command.GET_URIS, "r") )
+
+    
+    def readURIsAndConect( self, msg ) -> bool:
+        uris: List[str] = msg[ ARGS ][ 1: ]
+        existingURIs = [ value[self.URI] for _,value in self.nicknames.items()]
+        for uri in uris:
+            if uri not in existingURIs:
+                ip, port = uri.split(":")
+                if self.connectToIp( ip, int(port) ):
+                    print( colorama.Fore.GREEN + "URI Receeved, connected to a new peer" +
+                          " run \"listsockets\" for more info"
+                        + colorama.Style.RESET_ALL )
+                else:
+                    print(colorama.Fore.RED, f"ERR: Failed to connect to: {ip}:{self.port}" + colorama.Style.RESET_ALL)
+                    return False
+        return True
     
     def check_key( self, uri: str, cert ):
         ''' Check local records or Ask CA to validate key'''

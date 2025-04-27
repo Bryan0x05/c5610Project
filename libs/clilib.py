@@ -107,7 +107,40 @@ class shell(cmd.Cmd):
                 print(colorama.Fore.GREEN, "Exchange started with peer {sockNick}!" + colorama.Style.RESET_ALL)
         else:
             print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
-        
+    
+    def do_sendURIs( self, line : str ):
+        ''' Inform the target peer of all nodes were connected to <peer nickname>'''
+        try:
+            args = line.split()
+            sockNick = int(args[0])
+        except:
+            self.default( line )
+            return
+        if self.peer.nicknameExists( sockNick ):
+            if not self.peer.sendConnURIs( sockNick ):
+                print(colorama.Fore.RED, f"ERR: Sending URIs to {sockNick} failed!" + colorama.Style.RESET_ALL)
+            else:
+                print(colorama.Fore.GREEN, "URIs sent!" + colorama.Style.RESET_ALL)
+        else:
+            print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
+    
+    def do_requestURIs( self, line : str ):
+        ''' Ask the target peer, all the nodes it is connected to and aut-connected to them
+            <peer nickname>'''
+        try:
+            args = line.split()
+            sockNick = int(args[0])
+        except:
+            self.default( line )
+            return
+        if self.peer.nicknameExists( sockNick ):
+            if not self.peer.requestURIs( sockNick ):
+                print(colorama.Fore.RED, f"ERR: Requesting URIs from {sockNick} failed!" + colorama.Style.RESET_ALL)
+            else:
+                print(colorama.Fore.GREEN, "URIs requested!" + colorama.Style.RESET_ALL)
+        else:
+            print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
+
     def do_setPwd(self, _):
         ''' setPwd <none>, follow the prompts on screen to configure usr and pwd'''
         self.user = user = input( colorama.Fore.GREEN + "Set user name: " + colorama.Style.RESET_ALL )
