@@ -48,6 +48,12 @@ class keyRing():
         except:
             return False
         return True
+
+    @staticmethod
+    def compareByteToKey(  byteKey : bytes, key : rsa.RSAPublicKey ) -> bool:
+       keyObj = securityManager.deserializePubKey( byteKey )
+       if keyObj == key: return True
+       else: return False
     
     def __getitem__(self, uri :  str):
         return self.keys[uri]
@@ -101,10 +107,10 @@ class securityManager():
         return k.encrypt( data )
     
     @staticmethod
-    def uncompress( key : bytes, data : bytes ) -> str:
+    def uncompress( key : bytes, data : bytes ) -> bytes:
         k = Fernet( key )
         plainByteText : bytes = k.decrypt( data )
-        return plainByteText.decode()
+        return plainByteText
     
     @staticmethod
     def encrypt( key : rsa.RSAPublicKey, plaintext: bytes) -> bytes:
