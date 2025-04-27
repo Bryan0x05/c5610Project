@@ -30,7 +30,7 @@ class Command(Enum):
     HEARTBEAT = 4    # Node <-> Node: Heartbeat, I'm alive!
     KILL_SERVER = 5  # Node <-> Node: Kill the peer process
     KILL_NETWORK = 6 # Node <-> Node: Kill the entire network by sending the message to all other nodes
-    GET_URIS = 7      # Node <-> Node: Give me all the ip addresses you are connected too.
+    GET_URIS = 7      # Node <-> Node: Give me all the URIS you are connected too.
     SHUTDWN_CON = 8      # Node <-> Node: Connected peer is shutting down.
     CHECK_KEY = 9    # Node <-> CA: Validate this public key
     REG_KEY  = 10    # Node <-> CA: Register this key with the CA
@@ -253,6 +253,13 @@ class netProc:
                 return False
             
     def closeConn( self, nickname : int, msgFlag : bool = True ):
+        # TODO: Figure out why closeConn "over/under" closes with 2+ connections
+        logging.debug(f"nickname: {self.nicknames}")
+        logging.debug("="*20)
+        logging.debug(f"inboundConns: {self.inboundConns}")
+        logging.debug("="*20)
+        logging.debug(f"outboundConns: {self.outboundConns}")
+
         outSock : socket.socket = self.getSockByNickname( nickname )
         inSock = self.inboundConns[ self.nicknames[nickname][self.IN] ]
         
@@ -280,13 +287,19 @@ class netProc:
             if ( targetIpAddr, targetPort ) in self.outboundConns:
                 logging.debug(f"Already connected to {targetIpAddr}:{targetPort}" )
             else:
+                uri = f"{targetIpAddr}:{targetPort}"
+                if uri == self.uri:
+                    logging.warning(f"{self.uri} tried to connect to itself, aborting!")
+                    return False
+                
                 outSock.connect( (targetIpAddr, targetPort) )
                 # replace timeout with non-blocking
                 outSock.setblocking( False )
                 ipAddr, port = outSock.getsockname()
                 self.outboundConns[ (ipAddr, port) ] = outSock
+
                 # partial update, setting up  place holder inbound, outbound socket, target uri, target nodeType(assumed peer for now) 
-                self.nicknames[ self.conID ] = ( tuple(), ( ipAddr, port ), f"{targetIpAddr}:{targetPort}", nodeType.PEER )
+                self.nicknames[ self.conID ] = ( tuple(), ( ipAddr, port ), uri, nodeType.PEER )
                 # step 1 of the handshake
                 self.sendMsg( self.conID,  messageHandler.encode_message(Command.KNOCK, self.conID, self.port, self.type.value ))
                 logging.debug(f" Connected to {ipAddr}:{port}, connection nickname: {self.conID} ")
@@ -544,7 +557,6 @@ class peer(netProc):
 
     def listenCycle( self ):
         ''' Do all the server/client things '''
-        
         # see if there are any new connections
         self.acceptConn()
         # see if there are any new messages on existing connections
@@ -590,10 +602,10 @@ class peer(netProc):
         elif msg[COM] == Command.GET_URIS:
             # requesting us to give the list
             if msg[ ARGS ][ 0 ] == "R":
-                self.sendConnURIs( int( msg[ ARGS ][ 1 ]) )
+                self.sendConnURIs( recvNick )
             # sending us a list
             if msg[ ARGS ][ 0 ] == "S":
-                self.readURIsAndConect( msg )
+                self.readURIsAndConnect( msg )
         elif msg[COM] == Command.CHECK_KEY:
             self.check_key_listen( msg )
             # TODO: CLI logic for user to request this.
@@ -617,17 +629,21 @@ class peer(netProc):
         raise Exception("CA nick not found!")
     
     def requestURIs(self, nickname) -> bool:
-        return self.sendMsg( nickname, messageHandler.encode_message(Command.GET_URIS, "r") )
+        return self.sendMsg( nickname, messageHandler.encode_message(Command.GET_URIS, "R") )
 
     
-    def readURIsAndConect( self, msg ) -> bool:
+    def readURIsAndConnect( self, msg ) -> bool:
         uris: List[str] = msg[ ARGS ][ 1: ]
         existingURIs = [ value[self.URI] for _,value in self.nicknames.items()]
+        existingURIs.append(self.uri)
+        print(f"uris: {uris}")
+        print(f"existingURIs: {existingURIs}")
+
         for uri in uris:
             if uri not in existingURIs:
                 ip, port = uri.split(":")
                 if self.connectToIp( ip, int(port) ):
-                    print( colorama.Fore.GREEN + "URI Receeved, connected to a new peer" +
+                    print( colorama.Fore.GREEN + "URI Recieved, connected to a new peer" +
                           " run \"listsockets\" for more info"
                         + colorama.Style.RESET_ALL )
                 else:
