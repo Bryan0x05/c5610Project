@@ -104,7 +104,7 @@ class shell(cmd.Cmd):
             if not self.peer.xchng_key( sockNick ):
                 print(colorama.Fore.RED, f"ERR: Exchanging with peer {sockNick} failed!" + colorama.Style.RESET_ALL)
             else:
-                print(colorama.Fore.GREEN, "Exchange started with peer {sockNick}!" + colorama.Style.RESET_ALL)
+                print(colorama.Fore.GREEN, f"Exchange started with peer {sockNick}!" + colorama.Style.RESET_ALL)
         else:
             print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
     

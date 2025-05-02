@@ -51,9 +51,9 @@ class keyRing():
 
     @staticmethod
     def compareByteToKey(  byteKey : bytes, key : rsa.RSAPublicKey ) -> bool:
-       keyObj = securityManager.deserializePubKey( byteKey )
-       if keyObj == key: return True
-       else: return False
+        keyObj = securityManager.deserializePubKey( byteKey )
+        if keyObj == key: return True
+        else: return False
     
     def __getitem__(self, uri :  str):
         return self.keys[uri]
@@ -87,11 +87,11 @@ class securityManager():
         return USERPATH.format(user=user)
     
     @staticmethod
-    def generatePKCKeys() -> typing.Tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]: # type:ignore
+    def generatePKCKeys( keyLen: int = 4096) -> typing.Tuple[ rsa.RSAPublicKey, rsa.RSAPrivateKey ]: # type:ignore
         ''' Generate public and private key pair'''
         priKey = rsa.generate_private_key( 
-            public_exponent=65537,         
-            key_size=4096,
+            public_exponent=65537,
+            key_size=keyLen,
             backend=default_backend() # ! Generates errors if the optional ("optional") backend is not set.
         )
         return priKey.public_key(), priKey  # type:ignore
@@ -158,6 +158,12 @@ class securityManager():
         # TODO: Wrap a custom arrow that can be caught by read message to inform the user
         if plaintextBytes == None: raise Exception("decryptig message... failed!")
         return bytes(plaintextBytes)
+    
+    @staticmethod
+    def hash( data : bytes ) -> bytes:
+        digest = hashes.Hash( hashes.SHA384(), backend=default_backend() )
+        digest.update( data )
+        return digest.finalize()
 
 if __name__ == "__main__":
     pass

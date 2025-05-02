@@ -10,7 +10,7 @@ import os
 import subprocess
 import pty
 import colorama
-from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey, RSAPrivateKey
 import libs.clilib  as clilib
 import libs.seclib as seclib
 import base64
@@ -65,9 +65,9 @@ class netProc:
     OUT = ARGS = 1
     URI = 2
     
-    def __init__( self, port: int, name: str = "_"):
-        self.keypub, self.prikey = seclib.securityManager.generatePKCKeys()
+    def __init__( self, port: int, name: str = "_", keySize : int = 4096):
         self.keyring = seclib.keyRing()
+        self.pubkey, self.prikey = seclib.securityManager.generatePKCKeys( keySize )
         self.compressKey = seclib.securityManager.generateCompressionKey()
         self.port = port
         # 0 means the client/server socket in our node
@@ -211,7 +211,7 @@ class netProc:
             ipAddr, port = outSock.getsockname()
             self.outboundConns[ (ipAddr, port) ] = outSock
             # complete Peer2(receiving) dictionary entry
-            self.nicknames [ self.conID ] = ( self.nicknames[self.conID][self.IN], (ipAddr, port), f"{replyIp}:{replyPort}", replyNodeType )
+            self.nicknames [ self.conID ] = ( self.nicknames[self.conID][self.IN], (ipAddr, port), f"{replyIp}:{replyPort}", self.type )
             # Give peer1, the final handshake msg
             self.sendMsg( self.conID, messageHandler.encode_message( Command.KNOCK, 'R', replyId, self.type.value ) )
             print( colorama.Fore.GREEN + "New peer detected, run \"listsockets\" for more info"
@@ -276,8 +276,8 @@ class netProc:
         self.nicknames.pop( nickname )
 
     def connectToHost( self, hostName: str, port: int ) -> bool:
-       ''' Connects by host name e.g. www.google.com '''
-       return self.connectToIp( socket.gethostbyname( hostName ), port )
+        ''' Connects by host name e.g. www.google.com '''
+        return self.connectToIp( socket.gethostbyname( hostName ), port )
     
     def connectToIp( self, targetIpAddr: str, targetPort : int ) -> bool:
         ''' Connects by ipv4 address, adds URI to local dictionary '''
@@ -360,13 +360,15 @@ class netProc:
                 # decompress
                 protoHeader = msg.decode()
                 compressKey, isMsgEncrypted, msg = tuple([m.encode() for m in protoHeader.split(ASEP,2)])
-                compressKey = base64.b64decode(compressKey.decode())
                 msg = base64.b64decode(msg)
                 senderNick = self.resolveSockNickName(  sock )
                 senderURI = self.nicknames[senderNick][self.URI]
                 if self.keyring.has(senderURI) and bool(isMsgEncrypted):
+                    print(f"\n\nprikey length: {self.prikey.key_size}\n\n compress key length {len(compressKey)}")
+                    # compressKey = seclib.securityManager.decrypt(self.prikey, compressKey)
                     # the sender encrypts with our pub key, we must use our private key
                     msg = seclib.securityManager.decrypt( self.prikey, msg  )
+                compressKey: bytes = base64.b64decode(compressKey.decode())
                 uncompressedMsg = seclib.securityManager.uncompress( compressKey, msg )
                 return messageHandler.decode_message( uncompressedMsg )
             except Exception:
@@ -434,7 +436,7 @@ class netProc:
                 if self.keyring.has( receiverURI ) and doEncrypt :
                     isMsgEncrypted = True
                     msg = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], msg )
-
+                    # packagedCompKey = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], packagedCompKey )
                 msg = f"{packagedCompKey.decode()}{ASEP}{isMsgEncrypted}{ASEP}{base64.b64encode(msg).decode()}".encode()
                 logging.debug( f"sending msg len: {len(msg)}")
                 self.getSockByNickname(nickname).sendall( msg )
@@ -464,43 +466,59 @@ class netProc:
 class CA(netProc):
     def __init__( self, port: int = 0, name: str = "_ " ):
         self.name = name
-        super().start()
+        self.keypub, self.prikey = seclib.securityManager.generatePKCKeys( 4_184)
+
+        super().__init__(port, name, keySize = 4_096)
+        self.type = nodeType.CA
 
     def listenCycle( self ):
         self.acceptConn()
-        msg = self.checkForMsgs()
-        if msg is None:
+        recdMsg = self.checkForMsgs()
+        if recdMsg is None:
             return # contine
-        revSock = msg[1]
-        msg = msg[0]
+        revSock = recdMsg[1]
+        # filtering out the socket from msg
+        msg: Tuple[Command, list[str]] = recdMsg[0]
         if msg is None:
             return False # effectively continue
         logging.debug(f"CA read: {msg} from {revSock}")
         recvNick = self.resolveSockNickName( revSock )
         
         if msg[COM] == Command.CHECK_KEY:
+            ''' incoming args: uri, cert'''
             uri =  msg[ARGS][1]
-            clientCert = msg[ARGS][2]
-            clientKey = seclib.securityManager.decrypt( self.prikey, clientCert.encode() )
+            clientCert = msg[ARGS][2]            
+            clientKeyDigest = seclib.securityManager.decrypt( self.prikey, clientCert.encode() )
+            # clientKey = seclib.securityManager.uncompress( self.compressKey, clientKey )
             
-            if self.keyring.has( uri ) and seclib.keyRing.compareByteToKey( clientKey,self.keyring[uri][self.KEY]):
-                keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.keypub ) ).decode()
-                self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, "T", uri, keyStr ) )
+            if self.keyring.has( uri ):
+                keyToCheck =  seclib.securityManager.serializePubKey(self.keyring[uri][self.KEY])
+                digest = seclib.securityManager.hash( keyToCheck )
+                if digest == clientKeyDigest:
+                    keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.keyring[uri][self.KEY]  ) ).decode()
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, "T", uri, keyStr ) )
+                else:
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, "F" ) )
             else:
                 self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, "F" ) )
             self.closeConn( recvNick, True )
 
         elif msg[COM] == Command.REG_KEY:
-            key = seclib.securityManager.decrypt( self.prikey, (msg[ARGS][self.KEY]).encode() )
-            clientKeyObj = seclib.securityManager.deserializePubKey( key )
+            recvKey = base64.b64decode( (msg[ARGS][self.KEY]).encode() )
+            clientKeyObj = seclib.securityManager.deserializePubKey( recvKey )
             # Register key with the URI of the sender, so they can't easily pretend to be another URI
             if self.keyring.add( self.nicknames[recvNick][self.URI], clientKeyObj, nodeType.PEER, True ):
                 # Can't use a same size RSA key to encrypt RSA key (too large)
                 # So we compress it first
                 
-                # TODO: I don't think the implications of compressingData to form the cert is properly dealt with yet.
-                compressedData = seclib.securityManager.compress(  self.compressKey, key )
-                cert = seclib.securityManager.encrypt( self.keypub, compressedData )
+                # compressedData = seclib.securityManager.compress(  self.compressKey, recvKey )
+                hashedKey = seclib.securityManager.hash( recvKey )
+                print(f"\n\n hashedKey data length: {len(hashedKey)}\n\n")
+                # needs to be hashed, since peer and CA have same size key
+                cert = seclib.securityManager.encrypt( self.keypub, hashedKey )
+                # needs to be hash, sends sendMsg might try encrypting the message ( same size issue again)
+                cert = seclib.securityManager.hash( cert )
+                print(f"\n\n cert data length: {len(cert)}\n\n")
                 self.sendMsg( recvNick, messageHandler.encode_message(Command.REG_KEY, "T", cert ) )
             else:
                 self.sendMsg( recvNick, messageHandler.encode_message(Command.REG_KEY, "F" ) )
@@ -522,13 +540,16 @@ class CA(netProc):
         return False
     
     def start( self ):
+        super().start()
+        print(f"CA {self.name} is listening on {self.ip}:{self.port}")
+
         self.stop = False
         while not self.stop:
             self.stop = self.listenCycle()
 
 class peer(netProc):
     def __init__(self, port: int = 0, name: str = "_", subProc = False, debug = False, test = False ):
-        super().__init__( port, name )
+        super().__init__( port, name, keySize = 4_096 )
         self.port = port
         self.type = nodeType.PEER
         self.ip = "No ip"
@@ -661,7 +682,7 @@ class peer(netProc):
             else:
                 return True
         else:
-           return False
+            return False
     
     def check_key_listen( self,  msg : Tuple[Command, List[str]] ) -> bool:
         ''' listen to reply from CA after asking to validate the provided cert for a peer's pub key'''
@@ -702,7 +723,7 @@ class peer(netProc):
     def reg_key( self ):
         # find our CA ( or the first CA we see )
         try:
-            keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.keypub ) ).decode()
+            keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.pubkey ) ).decode()
             self.sendMsg( self.CA, messageHandler.encode_message(Command.REG_KEY, keyStr) )
             return True
         except:
@@ -715,11 +736,11 @@ class peer(netProc):
         if msg == None:
             uri = self.nicknames[ recvNick ][self.URI]
             # convert our key object to bytes, then decode into str to be compadiable with message handler
-            keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
+            keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
             if not self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "R" ), False ):
-                 logging.error( "xchng_key send msg failed!" )
-                 logging.error( traceback.format_exc )
-                 return False
+                logging.error( "xchng_key send msg failed!" )
+                logging.error( traceback.format_exc )
+                return False
         else: # we are receiving an incoming xchng
             recvKey = msg[ARGS][0]
             recvCert = msg[ARGS][1]
@@ -734,7 +755,7 @@ class peer(netProc):
                       + colorama.Style.RESET_ALL)
 
             if replyFlag == "R":
-                keyStr = seclib.securityManager.serializePubKey( self.keypub ).decode()
+                keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
                 if not self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "S"), False ):
                     logging.error( "xchng_key send msg failed!" )
                     logging.error( traceback.format_exc )
@@ -755,7 +776,7 @@ class peer(netProc):
         # close all our sockets
         self.shutDown()
         return True
-         
+        
     def knock(self, ip_addr, port) -> bool:
         print(colorama.Fore.GREEN, f"Connecting to {ip_addr}:{port}..." + colorama.Style.RESET_ALL )
         if self.connectToIp( ip_addr, port ):

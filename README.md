@@ -16,6 +16,9 @@
 *  up/down arrow to go through command history
 *  enter, to repeat last output to terminal and newline.
 
+### Notes
+* Only 1 CA is supported at a given time in the network
+
 ## Using TMUX
 Relevant hotkeys:
 * C^b + arrow key - to switch between windows panes.
