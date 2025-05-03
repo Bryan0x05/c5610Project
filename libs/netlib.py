@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey, RSAPriva
 import libs.clilib  as clilib
 import libs.seclib as seclib
 import base64
+import datetime
 # import curses # linux based module for terminal formatting
 
 # argument seperator
@@ -61,6 +62,7 @@ class threadPlus ( threading.Thread ):
 class netProc:
     '''Super class for the common networking functions between client and server'''
     # constants for accessing several dictionaries in a more readable fashion
+    # TODO: Make these constants global!
     COM = IN = KEY = 0
     OUT = ARGS = 1
     URI = 2
@@ -85,12 +87,20 @@ class netProc:
         self.type : nodeType = nodeType.PEER
         self.ip = "_"
         self.up = False
+        self.cert = bytes(0)
 
     @property
     def uri(self) -> str:
         if self.up:
             return f"{self.ip}:{self.port}"
         raise Exception("URI. URI not set yet")
+    
+    @property        
+    def CA(self) -> int:
+        for nick, nickVal in self.nicknames.items():
+            if nickVal[CAVAL] == nodeType.CA:
+                return nick
+        raise Exception("CA nick not found!")
     
     @staticmethod
     def getPort( sock : socket.socket ) -> int:
@@ -346,7 +356,7 @@ class netProc:
         incMsg : bytes = bytes()
         try: # TODO: Process and only read up to header size instead of reading forever until we timeout
             while len( incMsg := sock.recv(1024) ) > 0:
-                    msg += incMsg
+                msg += incMsg
         except ( socket.timeout, BlockingIOError ): # Treating timeout as an async try again error
             pass
         except OSError:
@@ -358,7 +368,7 @@ class netProc:
             # if we have a keyring for it, then we have exchange keys with the sender and must decrypt it
             try:
                 # decompress
-                logging.debug(f"\nReadmsg protoheader: {msg}\n")
+                # logging.debug(f"\nReadmsg protoheader: {msg}\n")
                 # check first byte for encryption flag
                 isMsgEncrypted = bool(msg[0])
                 # grab the 2 bytes to find the index of the split between compress key and msg
@@ -490,6 +500,65 @@ class netProc:
     def heartbeat_request(self, nickname) -> bool:
         return self.sendMsg(nickname, messageHandler.encode_message(Command.HEARTBEAT, "S", self.ip, self.port) )
     
+    def xchng_key(self, recvNick : int, msg : Union[Tuple[Command, List[str]], None] = None) -> bool:
+        ''' Exchange keys with another node'''
+        CERT = 2
+        # if we are starting the xchange:
+        if msg == None:
+            uri = self.nicknames[ recvNick ][self.URI]
+            # convert our key object to bytes, then decode into str to be compadiable with message handler
+            keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
+            if not self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "R" ), False ):
+                logging.error( "xchng_key send msg failed!" )
+                logging.error( traceback.format_exc )
+                return False
+        else: # we are receiving an incoming xchng
+            recvKey = msg[ARGS][0]
+            recvCert = msg[ARGS][1]
+            replyFlag = msg[ARGS][2] # R= requesting reply, S = Sending ( i.e. don't reply)
+            uri = self.nicknames[ recvNick ][self.URI]
+            recvKeyObj: RSAPublicKey = seclib.securityManager.deserializePubKey( recvKey.encode() )
+            if not self.keyring.has( uri ):
+                self.keyring.add( uri, recvKeyObj, nodeType.PEER )
+                if len(recvCert) > 0:
+                    self.check_key( uri, recvCert)
+                    stime = datetime.datetime.now()
+                    # wait for listen thread to hear back from CA
+                    while len(self.keyring[uri][CERT]) == 0:
+                        etime = datetime.datetime.now() - stime
+                        if etime > datetime.timedelta( seconds=10 ):
+                            print( colorama.Fore.RED + f" Timedout Validating {uri} public key!" + colorama.Style.RESET_ALL)
+                            break
+                    # if CA has certified the key
+                    if len(self.keyring[uri][CERT]) > 0:
+                        print( colorama.Fore.GREEN, f"CA has validated key for {uri}!" + colorama.Style.RESET_ALL )
+
+            if replyFlag == "R":
+                keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
+                if not self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "S"), False ):
+                    logging.error( "xchng_key send msg failed!" )
+                    logging.error( traceback.format_exc )
+                    return False
+                
+            print(colorama.Fore.GREEN, f"Keys exchanged with peer{recvNick}! All messages with peer{recvNick} will now be encrypted!"
+                + colorama.Style.RESET_ALL)
+
+        return True
+
+    def check_key( self, uri: str, cert ):
+        ''' Check local records or Ask CA to validate key'''
+        CERT = 2
+        if self.keyring.has( uri ):
+            if len( self.keyring[uri][CERT] ) > 0:
+                self.sendMsg( self.CA, messageHandler.encode_message(Command.CHECK_KEY, uri, cert))
+                print(colorama.Fore.GREEN, f"Validating key for {uri} with CA..." + colorama.Style.RESET_ALL )
+                return True
+            else:
+                print(colorama.Fore.RED, f"Can't validate key for {uri}, no cert on file`" + colorama.Style.RESET_ALL )
+                return False
+        else:
+            return False
+
 class CA(netProc):
     def __init__( self, port: int = 0, name: str = "_ " ):
         self.name = name
@@ -500,18 +569,21 @@ class CA(netProc):
 
     def listenCycle( self ):
         self.acceptConn()
-        recdMsg = self.checkForMsgs()
-        if recdMsg is None:
+        recvMsg = self.checkForMsgs()
+        if recvMsg is None:
             return # contine
-        revSock = recdMsg[1]
+        revSock = recvMsg[1]
         # filtering out the socket from msg
-        msg: Tuple[Command, list[str]] = recdMsg[0]
+        msg: Tuple[Command, list[str]] = recvMsg[0]
         if msg is None:
             return False # effectively continue
         logging.debug(f"CA read: {msg} from {revSock}")
         recvNick = self.resolveSockNickName( revSock )
         
-        if msg[COM] == Command.CHECK_KEY:
+        if msg[COM] == Command.XCHNG_KEY:
+            self.xchng_key( recvNick, msg )
+        
+        elif msg[COM] == Command.CHECK_KEY:
             ''' incoming args: uri, cert'''
             uri =  msg[ARGS][1]
             clientCert = msg[ARGS][2]            
@@ -522,8 +594,9 @@ class CA(netProc):
                 keyToCheck =  seclib.securityManager.serializePubKey(self.keyring[uri][self.KEY])
                 digest = seclib.securityManager.hash( keyToCheck )
                 if digest == clientKeyDigest:
-                    keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.keyring[uri][self.KEY]  ) ).decode()
-                    self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, "T", uri, keyStr ) )
+                    cert = seclib.securityManager.encrypt( self.pubkey, digest )
+                    cert = seclib.securityManager.hash( cert )
+                    self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, "T", uri, cert ) )
                 else:
                     self.sendMsg( recvNick, messageHandler.encode_message(Command.CHECK_KEY, "F" ) )
             else:
@@ -531,15 +604,12 @@ class CA(netProc):
             self.closeConn( recvNick, True )
 
         elif msg[COM] == Command.REG_KEY:
-            recvKey = base64.b64decode( (msg[ARGS][self.KEY]).encode() )
-            clientKeyObj = seclib.securityManager.deserializePubKey( recvKey )
-            # Register key with the URI of the sender, so they can't easily pretend to be another URI
-            if self.keyring.add( self.nicknames[recvNick][self.URI], clientKeyObj, nodeType.PEER, True ):
-                # Can't use a same size RSA key to encrypt RSA key (too large)
-                # So we compress it first
-                
+            '''Keys are exchanged with peer beforehand, so this only returns a cert'''
+            try:
+                clientKey = self.keyring[ self.nicknames[recvNick][self.URI]][self.KEY]
+                clientKeyBytes = seclib.securityManager.serializePubKey( clientKey )
                 # compressedData = seclib.securityManager.compress(  self.compressKey, recvKey )
-                hashedKey = seclib.securityManager.hash( recvKey )
+                hashedKey = seclib.securityManager.hash( clientKeyBytes )
                 print(f"\n\n hashedKey data length: {len(hashedKey)}\n\n")
                 # needs to be hashed, since peer and CA have same size key
                 cert = seclib.securityManager.encrypt( self.keypub, hashedKey )
@@ -547,7 +617,8 @@ class CA(netProc):
                 cert = seclib.securityManager.hash( cert )
                 print(f"\n\n cert data length: {len(cert)}\n\n")
                 self.sendMsg( recvNick, messageHandler.encode_message(Command.REG_KEY, "T", cert ) )
-            else:
+            except:
+                print( colorama.Fore.RED + "Cert generation failed" + colorama.Style.RESET_ALL )
                 self.sendMsg( recvNick, messageHandler.encode_message(Command.REG_KEY, "F" ) )
                 self.closeConn( recvNick, True )
 
@@ -583,7 +654,6 @@ class peer(netProc):
         self.subProc = subProc
         self.test = test
         self.debug = debug
-        self.cert : bytes = bytes(0)
         ( logging.getLogger() ).disabled = not debug
 
     def runLoop( self ):
@@ -627,7 +697,10 @@ class peer(netProc):
         elif msg[COM] == Command.RECV_MSG:
             msgRecv = msg[ARGS][1:]
             if self.cert == bytes(0):
-                print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
+                print(colorama.Fore.BLUE + f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
+                uri = self.nicknames[recvNick][self.URI]
+                if len( self.keyring[uri][2] ) == 0:
+                    print( colorama.Fore.RED + "Above message is from an uncertified peer!" + colorama.Style.RESET_ALL )
             else:
                 uri = self.nicknames[recvNick][self.URI]
                 if self.keyring.has( uri ) and self.keyring[uri][2] == True:
@@ -669,13 +742,6 @@ class peer(netProc):
             logging.debug("Peer default case reached:")
             pprint.pprint(msg)
     
-    @property        
-    def CA(self):
-        for nick, nickVal in self.nicknames.items():
-            if nickVal[CAVAL] == nodeType.CA:
-                return nick
-        raise Exception("CA nick not found!")
-    
     def requestURIs(self, nickname) -> bool:
         return self.sendMsg( nickname, messageHandler.encode_message(Command.GET_URIS, "R") )
 
@@ -699,38 +765,15 @@ class peer(netProc):
                     return False
         return True
     
-    def check_key( self, uri: str, cert ):
-        ''' Check local records or Ask CA to validate key'''
-        CERT = 2
-        if self.keyring.has( uri ):
-            if self.keyring[uri][CERT] != True:
-                self.sendMsg( self.CA, messageHandler.encode_message(Command.CHECK_KEY, uri, cert))
-                print(colorama.Fore.GREEN, f"Validating key for {uri} with CA..." + colorama.Style.RESET_ALL )
-            else:
-                return True
-        else:
-            return False
-    
     def check_key_listen( self,  msg : Tuple[Command, List[str]] ) -> bool:
         ''' listen to reply from CA after asking to validate the provided cert for a peer's pub key'''
         uri = msg[ARGS][1]
         if (msg[ARGS][0]) == "T":
-            key = msg[ARGS][2]
-            keyObj = seclib.securityManager.deserializePubKey( key.encode() )
-            self.keyring.add( uri, keyObj, nodeType.PEER, True )
-        else:
-            targetNick = -1
-            for nick, nickVal in self.nicknames.items():
-                if  nickVal[self.URI] == uri: 
-                    targetNick = nick
-                    break
-            if targetNick == -1:
-                logging.warning("Peer, check_key failed to find targetnick")
-            else:
-                print(colorama.Fore.RED+f"ERR: CA was unable to validate the certificate for: {targetNick} !"+colorama.Style.RESET_ALL)
+            cert = msg[ARGS][2]
+            return self.keyring.updateKey( uri, cert.encode() )
+        else: 
+            print(colorama.Fore.RED+f"ERR: CA was unable to validate the certificate for: {uri} !"+colorama.Style.RESET_ALL)
             return False
-        print(colorama.Fore.GREEN, f"Validated key for {uri}" + colorama.Style.RESET_ALL )
-        return True
     
     def reg_key_listen(self,  msg : Union[Tuple[Command, List[str]], None] = None) -> bool:
         ''' The REG_KEY function, that listens for the CA reply to the REG_KEY command message'''
@@ -751,44 +794,20 @@ class peer(netProc):
         # find our CA ( or the first CA we see )
         try:
             keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.pubkey ) ).decode()
-            self.sendMsg( self.CA, messageHandler.encode_message(Command.REG_KEY, keyStr) )
+            # auto exchange keys with CA, if not already done
+            # TODO put a print so the user is aware
+            if not self.keyring.has( self.nicknames[self.CA][self.URI] ):
+                self.xchng_key( self.CA )
+                # psuedo mutex to not progress while waiting for key exchange to finish
+                while False == self.keyring.has( self.nicknames[self.CA][self.URI] ):
+                    pass # wait for the listen thread to set this to true
+            # TODO: spin animation?
+            self.sendMsg( self.CA, messageHandler.encode_message(Command.REG_KEY) )
             return True
         except:
             print(colorama.Fore.RED+"ERR: CA was unable to register our key!"+colorama.Style.RESET_ALL)
         return False
-                
-    def xchng_key(self, recvNick : int, msg : Union[Tuple[Command, List[str]], None] = None) -> bool:
-        ''' Exchange keys with another peer'''
-        # if we are starting the xchange:
-        if msg == None:
-            uri = self.nicknames[ recvNick ][self.URI]
-            # convert our key object to bytes, then decode into str to be compadiable with message handler
-            keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
-            if not self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "R" ), False ):
-                logging.error( "xchng_key send msg failed!" )
-                logging.error( traceback.format_exc )
-                return False
-        else: # we are receiving an incoming xchng
-            recvKey = msg[ARGS][0]
-            recvCert = msg[ARGS][1]
-            replyFlag = msg[ARGS][2] # R= requesting reply, S = Sending ( i.e. don't reply)
-            uri = self.nicknames[ recvNick ][self.URI]
-            recvKeyObj: RSAPublicKey = seclib.securityManager.deserializePubKey( recvKey.encode() )
-            if not self.keyring.has( uri ):
-                # TODO: validate certs before adding
-                # ?: CA / anti-CA logic if the request has come from that peer type(?)
-                self.keyring.add( uri, recvKeyObj, nodeType.PEER )
-                print(colorama.Fore.GREEN, f"Keys exchanged with peer{recvNick}! All messages with peer{recvNick} will now be encrypted!"
-                      + colorama.Style.RESET_ALL)
-
-            if replyFlag == "R":
-                keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
-                if not self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "S"), False ):
-                    logging.error( "xchng_key send msg failed!" )
-                    logging.error( traceback.format_exc )
-                    return False
-
-        return True
+        
     
     def kill_peer(self) -> bool:
         logging.debug("peer shutting down")
