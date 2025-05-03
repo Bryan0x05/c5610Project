@@ -358,16 +358,31 @@ class netProc:
             # if we have a keyring for it, then we have exchange keys with the sender and must decrypt it
             try:
                 # decompress
-                protoHeader = msg.decode()
-                compressKey, isMsgEncrypted, msg = tuple([m.encode() for m in protoHeader.split(ASEP,2)])
-                msg = base64.b64decode(msg)
+                logging.debug(f"\nReadmsg protoheader: {msg}\n")
+                # check first byte for encryption flag
+                isMsgEncrypted = bool(msg[0])
+                # grab the 2 bytes to find the index of the split between compress key and msg
+                splitLoc = int.from_bytes(msg[1:3], 'big')
+                compressKeyBytes = msg[3:splitLoc]
+                msgBytes = msg[splitLoc+1:]
+                
                 senderNick = self.resolveSockNickName(  sock )
                 senderURI = self.nicknames[senderNick][self.URI]
-                if self.keyring.has(senderURI) and bool(isMsgEncrypted):
-                    print(f"\n\nprikey length: {self.prikey.key_size}\n\n compress key length {len(compressKey)}")
-                    # compressKey = seclib.securityManager.decrypt(self.prikey, compressKey)
+                if self.keyring.has(senderURI) and isMsgEncrypted:
+                    logging.debug(f"\n\nprikey length: {self.prikey.key_size}\n\n compress key length {len(compressKeyBytes)}")
+                    logging.debug("\n reading encrypted msg!\n")
+                    compressKey = seclib.securityManager.decrypt(self.prikey, compressKeyBytes)
                     # the sender encrypts with our pub key, we must use our private key
-                    msg = seclib.securityManager.decrypt( self.prikey, msg  )
+                    msg = seclib.securityManager.decrypt( self.prikey, msgBytes  )
+                elif isMsgEncrypted:
+                    print(colorama.Fore.RED, f"ERR: Failed to read encrypted msg from: {sock.getsockname()}, no key in key ring!"
+                          + colorama.Style.RESET_ALL)
+                    return None
+                else: # not encrypted
+                    msg = msgBytes
+                    compressKey = compressKeyBytes
+                
+                msg = base64.b64decode(msg)
                 compressKey: bytes = base64.b64decode(compressKey.decode())
                 uncompressedMsg = seclib.securityManager.uncompress( compressKey, msg )
                 return messageHandler.decode_message( uncompressedMsg )
@@ -392,8 +407,13 @@ class netProc:
         if len(msg) > 0:
             try:
                 # parse protoheader to get compression key, check for encryption and message.
-                protoHeader = msg.decode()
-                compressKey, isMsgEncrypted, msg = tuple([m.encode() for m in protoHeader.split(ASEP,2)])
+                # check first byte for encryption flag
+                isMsgEncrypted = bool(msg[0])
+                # grab the 2 bytes to find the index of the split between compress key and msg
+                splitLoc = int.from_bytes(msg[1:3], 'big')
+                compressKey = msg[3:splitLoc]
+                msg = msg[splitLoc+1:]
+                
                 compressKey = base64.b64decode(compressKey.decode())
 
                 # simple read doesn't handle encrpytion
@@ -428,18 +448,25 @@ class netProc:
         if self.nicknameExists( nickname ):
             try:
                 # ! compress message to make fit under RSA size requirements floor(keysize/8) - 11 (which is 501 in our case)
-                msg = seclib.securityManager.compress( self.compressKey, msg)
+                msg = base64.b64encode(seclib.securityManager.compress( self.compressKey, msg))
                 # Fernet is byte-based, convert to text-safe.
                 packagedCompKey = base64.b64encode(self.compressKey)
                 receiverURI = self.nicknames[nickname][self.URI]
                 # Encrypt if we have a key for it
                 if self.keyring.has( receiverURI ) and doEncrypt :
+                    logging.debug("\nsending encrypted msg\n")
                     isMsgEncrypted = True
                     msg = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], msg )
-                    # packagedCompKey = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], packagedCompKey )
-                msg = f"{packagedCompKey.decode()}{ASEP}{isMsgEncrypted}{ASEP}{base64.b64encode(msg).decode()}".encode()
-                logging.debug( f"sending msg len: {len(msg)}")
-                self.getSockByNickname(nickname).sendall( msg )
+                    packagedCompKey = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], packagedCompKey )
+                
+                finalMsg = int(isMsgEncrypted).to_bytes(1, 'big')
+                finalMsg += (len(packagedCompKey) + 3).to_bytes(2, 'big')
+                finalMsg += packagedCompKey
+                finalMsg += ASEP.encode()
+                finalMsg += msg
+                # msg = f"{packagedCompKey.decode()}{ASEP}{int(isMsgEncrypted)}{ASEP}{msg.decode()}"
+                logging.debug( f"sending msg len: {len(finalMsg)}")
+                self.getSockByNickname(nickname).sendall( finalMsg )
                 return True
             except Exception:
                 # prints last exception and traceback to stderr
