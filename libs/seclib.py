@@ -117,8 +117,8 @@ class securityManager():
         '''Encrypt data using the provided key, returns ciphertext'''
         # padding here means adding randomness
         cipherTextBytes =  key.encrypt( plaintext, padding.OAEP(
-            mgf=padding.MGF1( algorithm= hashes.SHA256()), # mask generation
-            algorithm=hashes.SHA256(), # main hash func
+            mgf=padding.MGF1( algorithm= hashes.SHA224()), # mask generation
+            algorithm=hashes.SHA224(), # main hash func
             label=None
         ))
         # TODO: Wrap in a custom exeception that can be caught in netlib, and user informed
@@ -151,8 +151,8 @@ class securityManager():
         plaintextBytes = key.decrypt(
         ciphertext,
         padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
+            mgf=padding.MGF1(algorithm=hashes.SHA224()),
+            algorithm=hashes.SHA224(),
             label=None
         ))
         # TODO: Wrap a custom arrow that can be caught by read message to inform the user
@@ -161,7 +161,7 @@ class securityManager():
     
     @staticmethod
     def hash( data : bytes ) -> bytes:
-        digest = hashes.Hash( hashes.SHA384(), backend=default_backend() )
+        digest = hashes.Hash( hashes.SHA256(), backend=default_backend() )
         digest.update( data )
         return digest.finalize()
 

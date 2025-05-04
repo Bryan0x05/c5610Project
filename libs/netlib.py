@@ -23,6 +23,9 @@ ASEP = "|"
 COM = 0
 ARGS = 1
 CAVAL = 3
+# allows custom error object for easier catching
+class CANotFound(Exception):
+    pass
 
 class Command(Enum):
     GET_DICT = 0     # Node <-> Node: Get nickname dictionary from Node
@@ -37,13 +40,13 @@ class Command(Enum):
     CHECK_KEY = 9    # Node <-> CA: Validate this public key
     REG_KEY  = 10    # Node <-> CA: Register this key with the CA
     XCHNG_KEY  = 11  # Node <-> Node: Exchange public keys.
-
+    XCHNG_CERT =  12 # Node <->: Exchange public key certs.
 class nodeType(Enum):
     PEER = 0
     CA = 1
 
 logging.basicConfig(level=logging.DEBUG)
-# TODO: Known issue, threadplus doesn't like arguments. WIP.
+# BUG: Threadplus doesn't like function arguments, however, we never invoke it with function arguments so this bug is low pri
 class threadPlus ( threading.Thread ):
     ''' Thread wrapper to externally killed in a safe manner'''
     def __init__(self, *args, **kwargs) -> None:
@@ -101,7 +104,7 @@ class netProc:
         for nick, nickVal in self.nicknames.items():
             if nickVal[CAVAL] == nodeType.CA:
                 return nick
-        raise Exception("CA nick not found!")
+        raise CANotFound("CA nick not found!")
     
     @staticmethod
     def getPort( sock : socket.socket ) -> int:
@@ -132,11 +135,14 @@ class netProc:
             return "127.0.0.1"
     
     def resolveSockNickName( self, insock : socket.socket ):
-        ''' Finds the nickname mapping of a incoming socket'''
+        ''' Finds the nickname mapping of an incoming socket'''
         inSockNick = -1
-        inSockInfo = insock.getsockname()
-        for nick, ipAndPort in self.nicknames.items():
-            if ipAndPort[self.IN] == inSockInfo:
+        # inbounds sockets will have the same ip and port matching our listening oscket
+        # They however should have different peer sockets
+        inSockInfo = insock.getpeername()
+        for nick, nickValue in self.nicknames.items():
+            inS = self.inboundConns[ nickValue[ self.URI ] ] 
+            if inS.getpeername() == inSockInfo:
                 inSockNick = nick
         if inSockNick == -1:
             raise Exception(" RESOLVESOCKNICKNAME: couldn't resolve socket nickname for an incoming socket")
@@ -163,7 +169,6 @@ class netProc:
         try:
             # Despite accepting this connection the other peer actually doesn't know to listen to this port so its only 1-way.
             inSock, peerAddrAndPort = self.socket.accept()
-            logging.debug(f"Accept connection from: {peerAddrAndPort}, on socket: {inSock.getsockname()}")
             inSock.setblocking( False)
             msg = None
             
@@ -178,7 +183,8 @@ class netProc:
                 # First time seeing this inbound socket update our local dicts to reflect the
                 # New inbound socket
                 self.nicknames[ self.conID ] = (  inSock.getsockname() , tuple(), "_" , nodeType.PEER )
-                
+                logging.debug(f"Accept connection from: {peerAddrAndPort}, on socket: {inSock.getsockname()}, nickname: {self.conID}")
+
                 # Read handshake msg, make an outbound socket and update dictionary accordlying
                 return self.handshakeMid( inSock, peerAddrAndPort, msg )
             # happens on peer 1 ( peer 2 replies to peer 1's connection with its own )
@@ -264,13 +270,14 @@ class netProc:
                 return False
             
     def closeConn( self, nickname : int, msgFlag : bool = True ):
-        # TODO: Figure out why closeConn "over/under" closes with 2+ connections
+        # TODO: Valid functionality with 2+ connections
+        '''
         logging.debug(f"nickname: {self.nicknames}")
         logging.debug("="*20)
         logging.debug(f"inboundConns: {self.inboundConns}")
         logging.debug("="*20)
         logging.debug(f"outboundConns: {self.outboundConns}")
-
+        '''
         outSock : socket.socket = self.getSockByNickname( nickname )
         inSock = self.inboundConns[ self.nicknames[nickname][self.URI] ]
         
@@ -370,13 +377,24 @@ class netProc:
         if len(msg) > 0:
             # if we have a keyring for it, then we have exchange keys with the sender and must decrypt it
             try:
-                # decompress
-                # logging.debug(f"\nReadmsg protoheader: {msg}\n")
+                ''' ========= PROTOHEADER(msg) ==============
+                isMsgEncrypted | splitLoc | compressKey | msg
+                =============================================
+                isMsgEncrypted - a byte value of a bool, saying if the following message is encrypted ( meaning if compressKey & msg are )
+                splitLoc - The byte index that delimits the split between compressKey & msg
+                compressKey - the key for the symmetric fernet encryption, also used to shorten all messages.
+                msg - the messageHandler header, that contains a Command enum and arguments for the receiver.
+                
+                This is called the protoheader as its a low level header that encapulsates the existing header created from messageHandler.
+                With some additional, often non-encrypted information.
+                '''
+                
                 # check first byte for encryption flag
                 isMsgEncrypted = bool(msg[0])
                 # grab the 2 bytes to find the index of the split between compress key and msg
                 splitLoc = int.from_bytes(msg[1:3], 'big')
                 compressKeyBytes = msg[3:splitLoc]
+                #  grab the msg
                 msgBytes = msg[splitLoc+1:]
                 
                 senderNick = self.resolveSockNickName(  sock )
@@ -408,7 +426,7 @@ class netProc:
         ''' A "lower-level' read Msg, doesn't decrypt, check keys or existing dictionaries'''
         msg : bytes = bytes()
         incMsg : bytes = bytes()
-        try: # TODO: Process and only read up to header size instead of reading forever until we timeout
+        try: # NOTE: Since we read till failure, DoS attack is trival
             while len( incMsg := sock.recv(1024) ) > 0:
                     msg += incMsg
         except ( socket.timeout, BlockingIOError ): # Treating timeout as an async try again error
@@ -428,7 +446,6 @@ class netProc:
                 msg = msg[splitLoc+1:]
                 
                 compressKey = base64.b64decode(compressKey.decode())
-
                 # simple read doesn't handle encrpytion
                 if isMsgEncrypted == True: raise ValueError("isMsgEncrypted is True in simpleReadMsg")
                 # msg is sent in a text-safe format, since the "compression" relies on it.
@@ -457,28 +474,48 @@ class netProc:
 
     def sendMsg( self, nickname: int, msg : bytes, doEncrypt : bool = True ) -> bool:
         ''' Send a message through a socket corresponding to the nickname '''
+        
+        ''' ========= PROTOHEADER(finalMsg) ==============
+        isMsgEncrypted | splitLoc | compressKey | msg
+        =============================================
+        isMsgEncrypted - a byte value of a bool, saying if the following message is encrypted ( meaning if compressKey & msg are )
+        splitLoc - The byte index that delimits the split between compressKey & msg
+        compressKey - the key for the symmetric fernet encryption, also used to shorten all messages.
+        msg - the messageHandler header, that contains a Command enum and argument for the receiver.
+        
+        This is called the protoheader as its a low level header that encapulsates the existing header created from messageHandler.
+        With some additional, often non-encrypted information.
+        '''
         isMsgEncrypted =  False
         if self.nicknameExists( nickname ):
             try:
-                # ! compress message to make fit under RSA size requirements floor(keysize/8) - 11 (which is 501 in our case)
+                # ! compress message to make fit under RSA size requirements keySize(4096) - 2 *  hash size(32) - 2 (which is 446 in our case)
                 msg = base64.b64encode(seclib.securityManager.compress( self.compressKey, msg))
+                logging.debug( f"raw msg len in sendMsg: {len(msg)}")
+                encryptedMsg = bytes(0)
                 # Fernet is byte-based, convert to text-safe.
                 packagedCompKey = base64.b64encode(self.compressKey)
                 receiverURI = self.nicknames[nickname][self.URI]
                 # Encrypt if we have a key for it
                 if self.keyring.has( receiverURI ) and doEncrypt :
-                    logging.debug("\nsending encrypted msg\n")
+                    logging.debug(f"\nsending encrypted msg to {nickname}\n")
                     isMsgEncrypted = True
-                    msg = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], msg )
+                    keyObj =  self.keyring[ receiverURI ][self.KEY]
+                    logging.debug(f"key size: {keyObj.key_size}")
+                    logging.debug(f"msg len: {len(msg)}")
+
+                    encryptedMsg = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], msg )
                     packagedCompKey = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], packagedCompKey )
                 
                 finalMsg = int(isMsgEncrypted).to_bytes(1, 'big')
                 finalMsg += (len(packagedCompKey) + 3).to_bytes(2, 'big')
                 finalMsg += packagedCompKey
                 finalMsg += ASEP.encode()
-                finalMsg += msg
-                # msg = f"{packagedCompKey.decode()}{ASEP}{int(isMsgEncrypted)}{ASEP}{msg.decode()}"
-                logging.debug( f"sending msg len: {len(finalMsg)}")
+                if len(encryptedMsg) < 1:
+                    finalMsg += msg
+                else:
+                    finalMsg += encryptedMsg
+                logging.debug( f"sending, finalMsg len: {len(finalMsg)}")
                 self.getSockByNickname(nickname).sendall( finalMsg )
                 return True
             except Exception:
@@ -515,17 +552,20 @@ class netProc:
                 logging.error( "xchng_key send msg failed!" )
                 logging.error( traceback.format_exc )
                 return False
+            return True
         else: # we are receiving an incoming xchng
             recvKey = msg[ARGS][0]
             recvCert = msg[ARGS][1]
             replyFlag = msg[ARGS][2] # R= requesting reply, S = Sending ( i.e. don't reply)
             uri = self.nicknames[ recvNick ][self.URI]
+            
             recvKeyObj: RSAPublicKey = seclib.securityManager.deserializePubKey( recvKey.encode() )
             if not self.keyring.has( uri ):
                 self.keyring.add( uri, recvKeyObj, nodeType.PEER )
-                if len(recvCert) > 0:
+                '''
+                if len(recvCert) > 0 and self.CA :
                     # Ask CA to check certificate
-                    self.check_key( uri, recvCert, self.CA )
+                    # self.check_key( uri, recvCert, self.CA )
                     stime = datetime.datetime.now()
                     # wait for listen thread to hear back from CA(spin lock), which will then set the cert field to non-zero.
                     while len(self.keyring[uri][CERT]) == 0:
@@ -533,11 +573,13 @@ class netProc:
                         if etime > datetime.timedelta( seconds=10 ):
                             print( colorama.Fore.RED + f" Timedout Validating {uri} public key!" + colorama.Style.RESET_ALL)
                             break
+                    
                     # if CA has certified the key
                     if len(self.keyring[uri][CERT]) > 1:
                         print( colorama.Fore.GREEN, f"CA has validated key for {uri}!" + colorama.Style.RESET_ALL )
                     else:
                         pass # cert failure print already handle in check_key_listen
+                    '''
 
             if replyFlag == "R":
                 keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
@@ -546,28 +588,36 @@ class netProc:
                     logging.error( traceback.format_exc )
                     return False
                 
-            print(colorama.Fore.GREEN, f"Keys exchanged with peer{recvNick}! All messages with peer{recvNick} will now be encrypted!"
+            print(colorama.Fore.GREEN, f"Keys exchanged with Node {recvNick}! All messages with Node {recvNick} will now be encrypted!"
+                  " To certify the key please see \"checkKey\" command"
                 + colorama.Style.RESET_ALL)
             print( clilib.PROMPT, end="", flush=True )
         return True
 
-    def check_key( self, uri: str, cert : str, targetNick : int ):
-        ''' Check local records or Ask CA to validate key'''
+    def check_key( self, uri: str, cert : str, targetNick : int ) -> bool:
+        ''' Send uri + cert to targetNick (should be our CA) to validate the cert for the provided key
+        This function is overloaded in the CA, so be weary of changing the top level arguments here'''
         CERT = 2
+        if targetNick == self.CA:
+            print(colorama.Fore.RED, f"Cannot checkKey our own CA" + colorama.Style.RESET_ALL )
+            return True
         if self.keyring.has( uri ):
-            # if we haven't already verified ( cert field in keyring is being overloaded as a flag in this instance )
-            if len( self.keyring[uri][CERT] ) == 0:
+            # if we haven't already successfuly verified ( cert field in keyring is being overloaded as a flag in this instance )
+            if len( self.keyring[uri][CERT] ) <= 1:
+                logging.debug("Calling send in check_key!")
+                # TODO: Make this no go to check_key_listen.
                 self.sendMsg( targetNick, messageHandler.encode_message(Command.CHECK_KEY, uri, cert))
                 print(colorama.Fore.GREEN, f"Cert of {uri} sent to CA, waiting..." + colorama.Style.RESET_ALL )
                 return True
             else:
-                print(colorama.Fore.RED, f"Cert for {uri} is already validated" + colorama.Style.RESET_ALL )
-                return False
+                print(colorama.Fore.GREEN, f"Cert for {uri} is already validated" + colorama.Style.RESET_ALL )
+                return True
         else:
+            print(colorama.Fore.RED, f"No key for {uri} to validate, please use \"exchangeKey\" first" + colorama.Style.RESET_ALL )
             return False
 
 class CA(netProc):
-    def __init__( self, port: int = 0, name: str = "_ " ):
+    def __init__( self, port: int = 0, name: str = "_" ):
         self.name = name
         self.keypub, self.prikey = seclib.securityManager.generatePKCKeys( 4_184)
 
@@ -581,14 +631,15 @@ class CA(netProc):
         recvMsg: Union[Tuple[Tuple[Command, List[str]], socket.socket], None] = self.checkForMsgs()
         if recvMsg is None:
             return # contine
-        revSock = recvMsg[1]
-        # filtering out the socket from msg
         msg: Tuple[Command, list[str]] = recvMsg[0]
         if msg is None:
             return False # effectively continue
-        logging.debug(f"CA read: command {msg[0]} from {revSock}")
-        recvNick = self.resolveSockNickName( revSock )
         
+        # filtering out the socket from msg
+        revSock = recvMsg[1]
+        recvNick = self.resolveSockNickName( revSock )
+        logging.debug(f"CA read: {msg[0]} from {recvNick}\n ca.nicknames:")
+        logging.debug(self.nicknames)
         if msg[COM] == Command.XCHNG_KEY:
             ''' Exchange keys with peer for encrypted communcation.
             Peer auto xchg_keys with CA when running CLI regKey command.'''
@@ -598,7 +649,6 @@ class CA(netProc):
             uri =  msg[ARGS][0]
             clientCert = msg[ARGS][1]  
             self.check_key( uri, clientCert, recvNick)
-            
 
         elif msg[COM] == Command.REG_KEY:
            self.reg_key( recvNick )
@@ -614,7 +664,6 @@ class CA(netProc):
             logging.warning("CA, default case reached!")
         # do not stop
         return False
-    # TODO: Investigate why reg_key struggles when CA has 2+ connections
     def reg_key( self, recvNick: int )->bool:
         '''Produce and return a certificate to the requesting peer'''
         try:
@@ -644,12 +693,14 @@ class CA(netProc):
             reMintedCert = seclib.securityManager.encrypt( self.pubkey, hashedKey )
             # Hashed again, so message can be sent in an encrypted fashion
             reMintedCert = seclib.securityManager.hash( reMintedCert )
-            if reMintedCert == cert:
+            if reMintedCert == cert.encode():
                 self.sendMsg( targetNick, messageHandler.encode_message(Command.CHECK_KEY, "T", uri, reMintedCert ) )
                 return True
+        # catch all, failure state
+        logging.debug( messageHandler.encode_message(Command.CHECK_KEY, "F", uri ) )
         self.sendMsg( targetNick, messageHandler.encode_message(Command.CHECK_KEY, "F", uri ) )
         return False
-    
+            
     def start( self ):
         super().start()
         print(f"CA {self.name} is listening on {self.ip}:{self.port}")
@@ -667,6 +718,8 @@ class peer(netProc):
         self.subProc = subProc
         self.test = test
         self.debug = debug
+        self.caKeyExchanged = threading.Event()
+        self.waitingForCert = threading.Event()
         ( logging.getLogger() ).disabled = not debug
 
     def runLoop( self ):
@@ -708,20 +761,17 @@ class peer(netProc):
             # nick = int( msg[ARGS][0] )
             # self.sendMsg( nick, messageHandler.encode_message(Command.RECV_MSG, " ".join(msg[ARGS][1:]) ))
         elif msg[COM] == Command.RECV_MSG:
-            msgRecv = msg[ARGS][1:]
-            if self.cert == bytes(0): # if no cert
-                uri = self.nicknames[recvNick][self.URI]
-                if self.keyring.has(uri) and len( self.keyring[uri][2] ) == 0:
-                    print( colorama.Fore.MAGENTA + f"From: {msg[ARGS][0]}(uncertified but encrypted), msg: {msgRecv}" + colorama.Style.RESET_ALL )
-                else:
-                    print(colorama.Fore.BLUE + f"From: {msg[ARGS][0]}(plaintext), msg: {msgRecv}" + colorama.Style.RESET_ALL )
+            msgRecv = msg[ARGS][0:]
+            uri = self.nicknames[recvNick][self.URI]
+            encryptFlag = self.keyring.has(uri)
+            certFlag = encryptFlag and len(self.keyring[uri][2]) > 1
+            
+            if encryptFlag and certFlag:
+                print(colorama.Fore.CYAN,f"From: {uri}(encrypted+certified), msg: {msgRecv}" + colorama.Style.RESET_ALL )
+            elif encryptFlag and not certFlag:
+                print( colorama.Fore.MAGENTA + f"From: {uri}(uncertified but encrypted), msg: {msgRecv}" + colorama.Style.RESET_ALL )
             else:
-                uri = self.nicknames[recvNick][self.URI]
-                if self.keyring.has( uri ) and self.keyring[uri][2] == True:
-                    print(colorama.Fore.BLUE,f"From: {msg[ARGS][0]}, msg: {msgRecv}" + colorama.Style.RESET_ALL )
-                else:
-                    # if no certf available
-                    print(colorama.Fore.MAGENTA + f"From: {msg[ARGS][0]}(uncertified), msg: {msgRecv}" + colorama.Style.RESET_ALL )
+                print(colorama.Fore.BLUE + f"From: {uri}(plaintext), msg: {msgRecv}" + colorama.Style.RESET_ALL )
             # for CLI formatting
             print( clilib.PROMPT, end="", flush=True )
 
@@ -746,10 +796,15 @@ class peer(netProc):
             # TODO: CLI logic for user to request this.
             pass
         elif msg[COM] == Command.REG_KEY:
-            ''' Reply from CA after registering our key'''
+            ''' Reply from CA after reg istering our key'''
             self.reg_key_listen( msg )
         elif msg[COM] == Command.XCHNG_KEY:
             self.xchng_key( recvNick, msg)
+            # set the flag regKey checks to see if it can procede
+            if self.nicknames[recvNick][3] == nodeType.CA:
+                self.caKeyExchanged.set()
+        elif msg[COM] == Command.XCHNG_CERT:
+            self.certExchange( recvNick, msg)
         elif msg[COM] == Command.SHUTDWN_CON:
             self.shutdwn_con( recvNick )
         else:
@@ -784,6 +839,7 @@ class peer(netProc):
         uri = msg[ARGS][1]
         if (msg[ARGS][0]) == "T":
             cert = msg[ARGS][2]
+            print(colorama.Fore.RED+f"CA validated the certificate for: {uri} !"+colorama.Style.RESET_ALL)
             return self.keyring.updateKey( uri, cert.encode() )
         else:
             # overload the cert field as a flag, to signal invalid cert
@@ -796,6 +852,8 @@ class peer(netProc):
         if msg == None: return False
         if (msg[ARGS][0]) == "T":
             self.cert = (msg[ARGS][1]).encode()
+            logging.debug(f"length of cert: {len(self.cert)}")
+            self.waitingForCert.set()
             res = True
         else:
             print(colorama.Fore.RED+"ERR: CA was unable to register our key!"+colorama.Style.RESET_ALL)
@@ -809,25 +867,52 @@ class peer(netProc):
                 self.closeConn( recvNick, False )
                 return True
     
-    def reg_key( self ):
-        # find our CA ( or the first CA we see )
+    def reg_key( self ) -> bool:
+        # find our CA ( the first CA we see if it exists )
         try:
+            # see if we already have a cert from the CA
+            if len(self.cert) > 1: 
+                print( colorama.Fore.GREEN+"Our key has already been registered with the CA"+colorama.Style.RESET_ALL)
+                return True
+            
             keyStr = base64.b64encode( seclib.securityManager.serializePubKey( self.pubkey ) ).decode()
             # auto exchange keys with CA, if not already done
-            # TODO put a print so the user is aware
             if not self.keyring.has( self.nicknames[self.CA][self.URI] ):
+                print( colorama.Fore.GREEN+"Auto-exchanging keys with CA!"+colorama.Style.RESET_ALL)
                 self.xchng_key( self.CA )
-                # psuedo mutex to not progress while waiting for key exchange to finish
-                while  self.keyring.has( self.nicknames[self.CA][self.URI] ) == False:
-                    pass # wait for the listen thread to set this to true
+                self.caKeyExchanged.wait(timeout=10) # wait for listen thread to process key exchange with CA and set this to true 
+                if not self.caKeyExchanged.is_set():
+                    print(colorama.Fore.RED+"ERR: Timed out waiting for CA response!"+colorama.Style.RESET_ALL)
+                    return False
             # TODO: spin animation?
-            logging.debug("reg key calling sendMsg")
             self.sendMsg( self.CA, messageHandler.encode_message(Command.REG_KEY) )
             return True
+        except CANotFound:
+            print(colorama.Fore.RED+"ERR: No CA in our socketlist!"+colorama.Style.RESET_ALL)
         except:
             print(colorama.Fore.RED+"ERR: CA was unable to register our key!"+colorama.Style.RESET_ALL)
         return False
-        
+    
+    def certExchange( self, nickname, msg : Union[Tuple[Command, List[str]], None] = None )->bool:
+        # if init
+        if msg == None:
+            self.sendMsg( nickname, messageHandler.encode_message( Command.XCHNG_CERT, "R", self.cert) )
+            return True
+        elif msg[ARGS][0] == "R":
+            if len(self.cert) <= 1: # if we don't have our own cert
+                self.sendMsg( nickname, messageHandler.encode_message( Command.RECV_MSG, "Can't complete certExchange, I do not have a cert, aborting!" ) )
+                return False 
+            self.sendMsg( nickname, messageHandler.encode_message( Command.XCHNG_CERT, "S", self.cert ) )
+
+            uri = self.nicknames[nickname][self.URI]
+            cert = msg[ARGS][1]
+            return self.check_key( uri, cert, nickname )
+        elif msg[ARGS][0] == "S":
+            cert = msg[ARGS][1]
+            uri = self.nicknames[nickname][self.URI]
+            return self.check_key( uri, cert,  nickname ) 
+        # catch all for malformed args
+        return False
     
     def kill_peer(self) -> bool:
         logging.debug("peer shutting down")
