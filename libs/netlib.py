@@ -76,7 +76,7 @@ class netProc:
         self.conID = 1
         self.name = name
         self.outboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = dict()
-        self.inboundConns: typing.Dict[ Tuple [ str, int ], socket.socket] = dict()
+        self.inboundConns: typing.Dict[ str, socket.socket] = dict()
         # keyed by int, with a 2-tuple of 2tuples each holding str,int pair
         self.nicknames: typing.Dict[ int, Tuple[ Tuple[str, int], Tuple[str, int], str, nodeType ] ] = dict()
         # ipv4, TCP
@@ -177,9 +177,9 @@ class netProc:
                 # First time seeing this inbound socket update our local dicts to reflect the
                 # New inbound socket
                 self.nicknames[ self.conID ] = (  inSock.getsockname() , tuple(), "_" , nodeType.PEER )
-                self.inboundConns[ inSock.getsockname() ]  = inSock
+                
                 # Read handshake msg, make an outbound socket and update dictionary accordlying
-                return self.handshakeMid( peerAddrAndPort, msg )
+                return self.handshakeMid( inSock, peerAddrAndPort, msg )
             # happens on peer 1 ( peer 2 replies to peer 1's connection with its own )
             elif msg[self.ARGS][0] == 'R': # step 3 of handshake ( creates duplex conn with 2 sockets )
                 # NOTE: Doesn't make a new entry, instead using the existing connectToIP made
@@ -199,7 +199,7 @@ class netProc:
             logging.error( traceback.format_exc() )
             return False
     
-    def handshakeMid( self, peerAddrAndPort, msg):
+    def handshakeMid( self, inSock, peerAddrAndPort, msg):
         ''' Deals with handshake step 2'''
         try:
             # information form socket peer
@@ -212,6 +212,7 @@ class netProc:
             # Reach other to peer's "server" socket to establish 2-way connection
             outSock = socket.socket( socket.AF_INET, socket.SOCK_STREAM )
             outSock.settimeout(5) # timeout is very long otherwise, we're running everything locally it should not be long.
+            self.inboundConns[ f"{replyIp}:{replyPort}" ]  = inSock
             outSock.connect( (replyIp, replyPort) )
 
             # set non-blocking behavior expected by the rest the program, overwritting the timeout.
@@ -237,10 +238,6 @@ class netProc:
     def completeHandshake( self, inSock : socket.socket, replyConId : int, replyNodeType : nodeType ) -> bool:
             ''''Accepts Step 3 of the handshake reply, peer 1 accepts an inbound socket from peer 2'''
             try:
-                logging.debug( "\n Complete handshake\n"
-                              f"peer1 inbounds: {self.inboundConns}\n replyConId: {replyConId}"
-                              f"\n peer1 nicknamkes: {self.nicknames} \n" )
-     
                 # the reply handshake should be to an existing already in-use conID
                 if not self.nicknameExists( replyConId ):
                     logging.error(f"completeHandshake: No existing nickname for conID {replyConId}")
@@ -250,7 +247,7 @@ class netProc:
                 uri = self.nicknames[replyConId][self.URI]
                 
                 # Register the inbound socket
-                self.inboundConns[inSock.getsockname()] = inSock
+                self.inboundConns[ uri ] = inSock
 
                 # Update the nickname entry to store both inbound and outbound sockets
                 self.nicknames[replyConId] = (inSock.getsockname(), outSockInfo, uri, replyNodeType)
@@ -275,7 +272,7 @@ class netProc:
         logging.debug(f"outboundConns: {self.outboundConns}")
 
         outSock : socket.socket = self.getSockByNickname( nickname )
-        inSock = self.inboundConns[ self.nicknames[nickname][self.IN] ]
+        inSock = self.inboundConns[ self.nicknames[nickname][self.URI] ]
         
         # Tell the other peer we are closing our sockets pair with them
         # If this function isn't invoked as a response of receiving one.
@@ -285,7 +282,7 @@ class netProc:
             ))
         outSock.close()
         inSock.close()
-        self.inboundConns.pop( self.nicknames[nickname][self.IN])
+        self.inboundConns.pop( self.nicknames[nickname][self.URI])
         self.outboundConns.pop( self.nicknames[nickname][self.OUT] )
         self.nicknames.pop( nickname )
 
