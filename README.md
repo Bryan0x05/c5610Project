@@ -2,7 +2,7 @@
 
 ## requirements
 * Ubuntu LTS ==  20.04.6 
-* Python == 3.8.10 ( NOTE: on the CS server this means using "python3" command and not "python" )
+* Python == 3.8.10 ( NOTE: on the CS server this means using "python3" command and not "python" and using cs.uml.edu not mercury )
 * Required Python modules are found requirements.txt or just "pip install -r requirements.txt"
 * Bash shell
 * Tmux
@@ -20,13 +20,16 @@ and one CA that functions on a call and response paradigm.
 *  "enter", to repeat last output to terminal and new CLI prompt.
 
 ## Command Line(CLI) Primer
-* info - prints out the current nodes URI which is ipAddr:port of the listening socket.
+* info - prints out the current nodes URI which is ipAddr:port of the listening socket. This info can be used to make a connection.
 * makeConn - establishes a 2-way connection between nodes
 * sendMsg - will send an plaintext msg by default, and any receiving peer will print out the msg to their commandline.
 * exchangeKey - Once a connection is established, keys can be exchanged between nodes. Future communcation between nodes
 will now be encrypted but not certified
 * regKey - Gets a cert from the CA
 * checkKey - exchanges certs between peers and requests validation of cert from the CA. If successful future messages are encrypted and certified.
+
+### Running Test Cases
+python3 test_test.py
 
 ### Notes
 * Only 1 CA is supported at a given time in the network.

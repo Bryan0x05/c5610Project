@@ -78,6 +78,7 @@ class securityManager():
             length=32,                 # byte length
             salt=salt,                 # salt (noise)
             iterations=iters,          # rounds of hashing 
+            backend=default_backend()
         )
         return kdf.derive( pwd.encode() )# type: ignore
     

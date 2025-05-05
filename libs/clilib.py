@@ -124,19 +124,20 @@ class shell(cmd.Cmd):
         except:
             self.default( line )
             return
-        # TODO: look into this and confirm logic is correct
         if self.peer.nicknameExists( sockNick ):
-            if not self.peer.xchng_key( sockNick ):
+            if not self.peer.xchng_key( sockNick, cli=False ):
                 print(colorama.Fore.RED, f"ERR: Exchanging with peer {sockNick} failed!" + colorama.Style.RESET_ALL)
             else:
                 print(colorama.Fore.GREEN, f"Exchange started with node {sockNick}..." + colorama.Style.RESET_ALL)
         else:
-            print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
+            print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )
+        self.peer.promptSignal.wait(timeout=1)
+        self.peer.promptSignal.clear()
     
     def do_sendURIs( self, line : str ):
-        ''' sendURIs < socknickname: int >
-        Description: Get send all URIs (global node ids) from that we are connected to the provided node id, said node will auto-connect to those nodes.
-        Arguments: socketnickname (int): A local id for the outbound socket ( see "listsockets" for what's available )
+        ''' sendURIs < peer_socknickname: int >
+        Description: Get send all URIs (global node ids) from that we are connected to the provided node id, said node will print out nay new URIS.
+        Arguments: peer_socknickname (int): A local id for the outbound socket to a peer type node ( see "listsockets" for what's available )
         '''
         try:
             args = line.split()
@@ -153,9 +154,9 @@ class shell(cmd.Cmd):
             print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
     
     def do_requestURIs( self, line : str ):
-        ''' requestURIs < socknickname: int >
-        Description: Get the URIs (global node ids) from the node id, and make our own direct connections to those nodes.
-        Arguments: socketnickname (int): A local id for the outbound socket ( see "listsockets" for what's available )
+        ''' requestURIs < peer_socknickname: int >
+        Description: Get the URIs (global node ids) from the node id, and print out any new URIs found.
+        Arguments: peer_socknickname (int): A local id for the outbound socket to a peer type node ( see "listsockets" for what's available )
         '''
         try:
             args = line.split()
@@ -217,6 +218,7 @@ class shell(cmd.Cmd):
         Arguments: None'''
         try:
             self.peer.reg_key()
+            return
         except:
             self.default(line)
 
@@ -248,8 +250,8 @@ class shell(cmd.Cmd):
                 # we are now certified, with our local cert and now need to exchange with the target peer
                 print( colorama.Fore.GREEN+"Starting cert exchange and validation, waiting..."+colorama.Style.RESET_ALL)
                 self.peer.certExchange(  nickname )
-                # TODO: finish this logic to re-actively check the cert of an existing connection
-            # self.peer.check_key( uri, self.peer.CA )
+                self.peer.promptSignal.wait(timeout=1)
+                self.peer.promptSignal.clear()
         except CANotFound:
             print( colorama.Fore.RED +"No CA in our existing connections, please connect to a CA node first"+colorama.Style.RESET_ALL )
         except:

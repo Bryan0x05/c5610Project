@@ -1,5 +1,6 @@
 import unittest
-from libs.netlib import peer, messageHandler, Command
+from libs.netlib import peer, messageHandler, Command, CA
+from typing import Union
 import time
 
 SETNODE = ("python3", "nodeSetup.py")
@@ -9,8 +10,8 @@ class TestCases( unittest.TestCase ):
     @classmethod
     def setUpClass( cls ):
         ''' Runs once per class, setting up the test bed'''
-        cls.peer1 = peer( name = "peer1", test = True, debug=True )
-        cls.peer2 = peer( name = "peer2", test = True, debug=True )
+        cls.peer1 = peer( name = "peer1", test = True, debug=False )
+        cls.peer2 = peer( name = "peer2", test = True, debug=False )
         cls.peer1.start()
         cls.peer2.start()
 
@@ -20,7 +21,7 @@ class TestCases( unittest.TestCase ):
         cls.peer1.shutDown()
         cls.peer2.shutDown()
     # set up a connection for each test
-    def connHelper( self, p1 : peer, p2 : peer ):
+    def connHelper( self, p1 : peer, p2 : Union[peer, CA] ):
         # step 1 of 3-way handshake, reach out and give our info
         self.assertTrue( p1.connectToIp( p2.ip, p2.port ), "handshake step 1 failed" )
 
@@ -63,6 +64,7 @@ class TestCases( unittest.TestCase ):
 
     def test_encrypted_msg( self ):
         ''' Monolithic test, testing key rings, CA, message en/de(decrpyt)'''
+        
         self.connHelper( self.peer1, self.peer2 )
         # ! Consumes an extra sendMsg from the 3-way handshake ( might be an issue with the handsake sending an extra msg ? )
         msg = self.peer2.checkForMsgs()
@@ -83,8 +85,20 @@ class TestCases( unittest.TestCase ):
         self.msgHelper( sender=self.peer1, recv=self.peer2, msg="hello peer 2")
         # test encrypted peer2->peer1 socket pair with ENCYPTED msg
         self.msgHelper( sender=self.peer2, recv=self.peer1, msg="hello peer 1")
-        # TODO: Add CA validation logic
-        
+        # setup a CA
+        Ca = CA( name = "CA", test=True, debug=False )
+        Ca.start()
+        self.connHelper( self.peer1, Ca )
+        self.assertTrue( self.peer1.reg_key(), "peer1 failed to send reg key request to CA!" )
+        rmsg = Ca.checkForMsgs()
+        if rmsg == None: assert False
+        self.assertTrue( rmsg[0] == Command.REG_KEY, "Ca did not read in peer 1 reg key request as expected")
+        # run CA register key logic and reply to peer1
+        Ca.reg_key( 1 )
+        # run one iteration of peer1's listen loop to handle CA reply
+        self.peer1.listenCycle()
+        # validate CA reply was handled correctly
+        self.assertTrue( len(self.peer1.cert) > 1, "Expected a valid cert for peer 1 from CA")
 
 def basicNetworkingSuite():
     suite = unittest.TestSuite()
@@ -96,7 +110,12 @@ def encryptionSuite():
     suite.addTest( TestCases("test_encrypted_msg") )
     return suite
 
+
 if __name__ == '__main__':
-    runner = unittest.TextTestRunner( verbosity=2 )
-    runner.run( basicNetworkingSuite() )
-    runner.run( encryptionSuite() )
+    # Combine both suites into one, for a cleaner CLI output
+    combined_suite = unittest.TestSuite()
+    combined_suite.addTests(basicNetworkingSuite())
+    combined_suite.addTests(encryptionSuite())
+
+    runner = unittest.TextTestRunner(verbosity=2)
+    runner.run(combined_suite)

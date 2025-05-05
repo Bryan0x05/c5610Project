@@ -1,14 +1,13 @@
 #!/bin/bash
-' *********************
-Setups a tmux server with 3 panes
+# ====================
+# Setups a tmux server with 3 panes
 
-Left and center panes, are their own processes with a multi-thread peer object.
-Each peer object has a listen thread to act as a server and CLI thread. The "shell>" shows
-that the CLI is active and accepting input.
+# Left and center panes, are their own processes with a multi-thread peer object.
+# Each peer object has a listen thread to act as a server and CLI thread. The "shell>" shows
+# that the CLI is active and accepting input.
 
-The rightmost pane, starts up a CA instance. The CA only does call and responds and has no attached CLI.
-**********************'
-
+# The rightmost pane, starts up a CA instance. The CA only does call and responds and has no attached CLI.
+# ====================
 echo "Starting the script"
 
 TMUX_SESSION_NAME='BTJ_NetSec'
