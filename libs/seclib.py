@@ -143,7 +143,6 @@ class securityManager():
         )
         if isinstance( keypub, rsa.RSAPublicKey):
             return keypub
-        # TODO: Wrap custom error that can be caught, and user informed?
         raise Exception("SecurityManager failed to deserialize key")
     
     @staticmethod
@@ -156,8 +155,7 @@ class securityManager():
             algorithm=hashes.SHA224(),
             label=None
         ))
-        # TODO: Wrap a custom arrow that can be caught by read message to inform the user
-        if plaintextBytes == None: raise Exception("decryptig message... failed!")
+        if plaintextBytes == None: raise Exception("decrypting message... failed!")
         return bytes(plaintextBytes)
     
     @staticmethod
