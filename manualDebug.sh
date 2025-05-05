@@ -1,29 +1,20 @@
 #!/bin/bash
-' *********************
-Setups a tmux server with 3 panes
-
-Left and center panes, are their own processes with a multi-thread peer object.
-Each peer object has a listen thread to act as a server and CLI thread. The "shell>" shows
-that the CLI is active and accepting input.
-
-The rightmost pane, starts up a CA instance. The CA only does call and responds and has no attached CLI.
-**********************'
-
+# Script create a split terminal and start up peer objects
 echo "Starting the script"
 
 TMUX_SESSION_NAME='BTJ_NetSec'
 TARGET_SCRIPT="setupNode.py"
 # subproc flag, debug flag, CA flag
-PEER_ARGS="F F F"
-CA_ARGS="F F T"
+PEER_ARGS="F T F"
+CA_ARGS="F T T"
 tmux new-session -d -s $TMUX_SESSION_NAME >/dev/null
 tmux new-window -t $TMUX_SESSION_NAME
 tmux split-window -h -t $TMUX_SESSION_NAME
 tmux split-window -h -t $TMUX_SESSION_NAME
 # quoting these variables when using them perserves the spacing, which is a very important argument delimiter
-tmux send-keys -t $TMUX_SESSION_NAME:1.0 "python3 "$TARGET_SCRIPT " " "$PEER_ARGS" " " "peer1" Enter
-tmux send-keys -t $TMUX_SESSION_NAME:1.1 "python3 "$TARGET_SCRIPT " " "$PEER_ARGS" " " "peer2" Enter
-tmux send-keys -t $TMUX_SESSION_NAME:1.2 "python3 "$TARGET_SCRIPT " " "$CA_ARGS" " " "CA" Enter
+tmux send-keys -t $TMUX_SESSION_NAME:1.0 "python3 "$TARGET_SCRIPT " " "$PEER_ARGS" Enter
+tmux send-keys -t $TMUX_SESSION_NAME:1.1 "python3 "$TARGET_SCRIPT " " "$PEER_ARGS" Enter
+tmux send-keys -t $TMUX_SESSION_NAME:1.2 "python3 "$TARGET_SCRIPT " " "$CA_ARGS" Enter
 tmux attach -t $TMUX_SESSION_NAME
 
 output="1"

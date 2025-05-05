@@ -38,12 +38,19 @@ class shell(cmd.Cmd):
         os.system('cls' if os.name == 'nt' else 'clear')
     
     def do_name( self, _ ):
-        ''' prints the name of our peer'''
+        '''name
+        Description: Prints the URI of our peer, its unique global identifer in the network
+        Arguments: None
+        '''
         print( self.peer.name )
         
     def do_quit( self, _ ):
-        '''exits the shell & terminates client'''
-        # Also see what happens in postcmd()
+        '''quit
+        Description: Closes both the listen and CLI threads of the our peer before gracefully exitting closing existing connections
+            and signaling connected nodes that said connections rae closed. 
+        Arguments: None
+        '''
+        # ! postcmd is called right after this and handles the termination and clean-up logic
         self.peer.up = False
         return True
     
@@ -127,7 +134,10 @@ class shell(cmd.Cmd):
             print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
     
     def do_sendURIs( self, line : str ):
-        ''' Inform the target peer of all nodes were connected to <peer nickname>'''
+        ''' sendURIs < socknickname: int >
+        Description: Get send all URIs (global node ids) from that we are connected to the provided node id, said node will auto-connect to those nodes.
+        Arguments: socketnickname (int): A local id for the outbound socket ( see "listsockets" for what's available )
+        '''
         try:
             args = line.split()
             sockNick = int(args[0])
@@ -143,8 +153,10 @@ class shell(cmd.Cmd):
             print(colorama.Fore.RED, f" ERR: Nickname {sockNick} is not an existing socket!" + colorama.Style.RESET_ALL )            
     
     def do_requestURIs( self, line : str ):
-        ''' Ask the target peer, all the nodes it is connected to and aut-connected to them
-            <peer nickname>'''
+        ''' requestURIs < socknickname: int >
+        Description: Get the URIs (global node ids) from the node id, and make our own direct connections to those nodes.
+        Arguments: socketnickname (int): A local id for the outbound socket ( see "listsockets" for what's available )
+        '''
         try:
             args = line.split()
             sockNick = int(args[0])
@@ -187,6 +199,10 @@ class shell(cmd.Cmd):
         print(colorama.Fore.GREEN,f"{self.peer.ip}:{self.peer.port}" + colorama.Style.RESET_ALL)
     
     def do_getAttr( self, line: str ):
+        '''getAttr < attr : str>
+        Description: A debug command, its a wrapper to print the peer object variable whose name matches the string to the CLI
+        Arguments: attribute(str), the string should be a name that matches an existing attribute in peer.
+            e.g. to see the value of peer.cert, type "getAttr cert" '''
         try:
             args = line.split()
             name = args[0]

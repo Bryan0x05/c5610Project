@@ -491,18 +491,14 @@ class netProc:
             try:
                 # ! compress message to make fit under RSA size requirements keySize(4096) - 2 *  hash size(32) - 2 (which is 446 in our case)
                 msg = base64.b64encode(seclib.securityManager.compress( self.compressKey, msg))
-                logging.debug( f"raw msg len in sendMsg: {len(msg)}")
                 encryptedMsg = bytes(0)
                 # Fernet is byte-based, convert to text-safe.
                 packagedCompKey = base64.b64encode(self.compressKey)
                 receiverURI = self.nicknames[nickname][self.URI]
                 # Encrypt if we have a key for it
                 if self.keyring.has( receiverURI ) and doEncrypt :
-                    logging.debug(f"\nsending encrypted msg to {nickname}\n")
                     isMsgEncrypted = True
                     keyObj =  self.keyring[ receiverURI ][self.KEY]
-                    logging.debug(f"key size: {keyObj.key_size}")
-                    logging.debug(f"msg len: {len(msg)}")
 
                     encryptedMsg = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], msg )
                     packagedCompKey = seclib.securityManager.encrypt( self.keyring[ receiverURI ][self.KEY], packagedCompKey )
@@ -548,7 +544,8 @@ class netProc:
             uri = self.nicknames[ recvNick ][self.URI]
             # convert our key object to bytes, then decode into str to be compadiable with message handler
             keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
-            if not self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "R" ), False ):
+            ourCert = ( base64.b64encode( self.cert ) ).decode()
+            if not self.sendMsg( recvNick ,messageHandler.encode_message(Command.XCHNG_KEY, keyStr, ourCert, "R" ), False ):
                 logging.error( "xchng_key send msg failed!" )
                 logging.error( traceback.format_exc )
                 return False
@@ -583,7 +580,8 @@ class netProc:
 
             if replyFlag == "R":
                 keyStr = seclib.securityManager.serializePubKey( self.pubkey ).decode()
-                if not self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, self.cert.decode(), "S"), False ):
+                ourCert = ( base64.b64encode( self.cert ) ).decode()
+                if not self.sendMsg( recvNick, messageHandler.encode_message(Command.XCHNG_KEY, keyStr, ourCert, "S"), False ):
                     logging.error( "xchng_key send msg failed!" )
                     logging.error( traceback.format_exc )
                     return False
@@ -605,8 +603,8 @@ class netProc:
             # if we haven't already successfuly verified ( cert field in keyring is being overloaded as a flag in this instance )
             if len( self.keyring[uri][CERT] ) <= 1:
                 logging.debug("Calling send in check_key!")
-                # TODO: Make this no go to check_key_listen.
-                self.sendMsg( targetNick, messageHandler.encode_message(Command.CHECK_KEY, uri, cert))
+                # Send cert for CA evaluation
+                self.sendMsg( self.CA, messageHandler.encode_message(Command.CHECK_KEY, uri, cert))
                 print(colorama.Fore.GREEN, f"Cert of {uri} sent to CA, waiting..." + colorama.Style.RESET_ALL )
                 return True
             else:
@@ -617,14 +615,14 @@ class netProc:
             return False
 
 class CA(netProc):
-    def __init__( self, port: int = 0, name: str = "_" ):
+    CERT = 2
+    def __init__( self, port: int = 0, name: str = "_" , debug = False ):
         self.name = name
         self.keypub, self.prikey = seclib.securityManager.generatePKCKeys( 4_184)
-
         super().__init__(port, name, keySize = 4_096)
         self.type = nodeType.CA
-        # disable regular non-log prints for the CA
-        builtins.print = lambda *args, **kwargs: None
+        ( logging.getLogger() ).disabled = not debug
+
 
     def listenCycle( self ):
         self.acceptConn()
@@ -638,8 +636,7 @@ class CA(netProc):
         # filtering out the socket from msg
         revSock = recvMsg[1]
         recvNick = self.resolveSockNickName( revSock )
-        logging.debug(f"CA read: {msg[0]} from {recvNick}\n ca.nicknames:")
-        logging.debug(self.nicknames)
+        logging.debug(f"CA read: {msg[0]} from {recvNick}\n")
         if msg[COM] == Command.XCHNG_KEY:
             ''' Exchange keys with peer for encrypted communcation.
             Peer auto xchg_keys with CA when running CLI regKey command.'''
@@ -676,7 +673,10 @@ class CA(netProc):
             cert = seclib.securityManager.encrypt( self.keypub, hashedKey )
             # needs to be hash, sends sendMsg might try encrypting the message ( same size issue again)
             cert = seclib.securityManager.hash( cert )
-            self.sendMsg( recvNick, messageHandler.encode_message(Command.REG_KEY, "T", cert ) )
+            # cache cert on file
+            self.keyring.updateKey(  self.nicknames[recvNick][self.URI], cert )
+            encodedCert = base64.b64encode( cert )
+            self.sendMsg( recvNick, messageHandler.encode_message(Command.REG_KEY, "T", encodedCert.decode() ) )
             return True
         except:
             print( colorama.Fore.RED + "Cert generation failed" + colorama.Style.RESET_ALL )
@@ -685,26 +685,28 @@ class CA(netProc):
     # TODO: check_key, is never succesfully validating the key(?) Could be peer side issue
     def check_key( self, uri, cert, targetNick ) ->bool:
         ''' Check peer provided cert, with the one we reconstruct with information on keyring'''
+        cachedCert = None
+        cert = base64.b64decode( cert.encode() )
         if self.keyring.has( uri ):
-            keyToCheck =  seclib.securityManager.serializePubKey(self.keyring[uri][self.KEY])
-            # Hashed to be sufficent size ( < ~501 bytes ) to encrypt
-            hashedKey = seclib.securityManager.hash( keyToCheck )
-            # ! Cryptography module only allows pub key encryption
-            reMintedCert = seclib.securityManager.encrypt( self.pubkey, hashedKey )
-            # Hashed again, so message can be sent in an encrypted fashion
-            reMintedCert = seclib.securityManager.hash( reMintedCert )
-            if reMintedCert == cert.encode():
-                self.sendMsg( targetNick, messageHandler.encode_message(Command.CHECK_KEY, "T", uri, reMintedCert ) )
+            cachedCert = self.keyring[uri][self.CERT]
+            if cachedCert == cert:
+                cachedCert =  base64.b64encode( cachedCert ).decode()
+                self.sendMsg( targetNick, messageHandler.encode_message(Command.CHECK_KEY, "T", uri, cachedCert ) )
                 return True
         # catch all, failure state
-        logging.debug( messageHandler.encode_message(Command.CHECK_KEY, "F", uri ) )
-        self.sendMsg( targetNick, messageHandler.encode_message(Command.CHECK_KEY, "F", uri ) )
+        msgToSend = messageHandler.encode_message(Command.CHECK_KEY, "F", uri )
+        logging.debug(f"certRecv: {cert}")
+        logging.debug("cachedCert" + f"{cachedCert}" )
+        logging.debug("msgToSend" + f"{msgToSend}" )
+        self.sendMsg( targetNick, msgToSend )
         return False
             
     def start( self ):
         super().start()
-        print(f"CA {self.name} is listening on {self.ip}:{self.port}")
-
+        print(f"{self.name} is listening on {self.ip}:{self.port}")
+        # Disable regular non-log prints for the CA. If debug is not toggled on, no prints will be visible form the CA.
+        # This stops it from printing out some CLI formating code that the peer uses.
+        builtins.print = lambda *args, **kwargs: None
         self.stop = False
         while not self.stop:
             self.stop = self.listenCycle()
@@ -718,6 +720,7 @@ class peer(netProc):
         self.subProc = subProc
         self.test = test
         self.debug = debug
+        # thread events used to block effeciently block CLI without spin locking to avoid running afoul of GIL mutex.
         self.caKeyExchanged = threading.Event()
         self.waitingForCert = threading.Event()
         ( logging.getLogger() ).disabled = not debug
@@ -839,8 +842,9 @@ class peer(netProc):
         uri = msg[ARGS][1]
         if (msg[ARGS][0]) == "T":
             cert = msg[ARGS][2]
-            print(colorama.Fore.RED+f"CA validated the certificate for: {uri} !"+colorama.Style.RESET_ALL)
-            return self.keyring.updateKey( uri, cert.encode() )
+            cert = base64.b64decode( cert.encode() )
+            print(colorama.Fore.GREEN+f"CA validated the certificate for: {uri} !"+colorama.Style.RESET_ALL)
+            return self.keyring.updateKey( uri, cert )
         else:
             # overload the cert field as a flag, to signal invalid cert
             self.keyring.updateKey( uri, bytes(1) )
@@ -851,8 +855,8 @@ class peer(netProc):
         ''' The REG_KEY function, that listens for the CA reply to the REG_KEY command message'''
         if msg == None: return False
         if (msg[ARGS][0]) == "T":
-            self.cert = (msg[ARGS][1]).encode()
-            logging.debug(f"length of cert: {len(self.cert)}")
+            cert = (msg[ARGS][1]).encode()
+            self.cert = base64.b64decode(cert)
             self.waitingForCert.set()
             res = True
         else:
@@ -895,14 +899,15 @@ class peer(netProc):
     
     def certExchange( self, nickname, msg : Union[Tuple[Command, List[str]], None] = None )->bool:
         # if init
+        ourCert = ( base64.b64encode( self.cert ) ).decode()
         if msg == None:
-            self.sendMsg( nickname, messageHandler.encode_message( Command.XCHNG_CERT, "R", self.cert) )
+            self.sendMsg( nickname, messageHandler.encode_message( Command.XCHNG_CERT, "R", ourCert) )
             return True
         elif msg[ARGS][0] == "R":
             if len(self.cert) <= 1: # if we don't have our own cert
                 self.sendMsg( nickname, messageHandler.encode_message( Command.RECV_MSG, "Can't complete certExchange, I do not have a cert, aborting!" ) )
                 return False 
-            self.sendMsg( nickname, messageHandler.encode_message( Command.XCHNG_CERT, "S", self.cert ) )
+            self.sendMsg( nickname, messageHandler.encode_message( Command.XCHNG_CERT, "S", ourCert ) )
 
             uri = self.nicknames[nickname][self.URI]
             cert = msg[ARGS][1]
